@@ -560,6 +560,21 @@ OPTIONS_ENTRY_FILL_TIMEOUT_MINUTES = 15
 # 0.0 to restore at-the-touch pricing.
 OPTIONS_ENTRY_LIMIT_BUFFER_PERCENT = 0.03
 
+# How many consecutive cycles the stop condition must hold before an
+# option is sold.
+#
+# Added 2026-08-03 after an EWZ call exited at -8.1% against a -35% stop.
+# The sell was priced at the stop and filled 42% above it, and no trade in
+# that window printed anywhere near the level — the quote feed had shown a
+# bid far below what the contract was worth.
+#
+# The books here are fresh but wide and jittery: 16-28% spreads with the
+# bid moving 8% between polls seconds apart. One reading is not evidence.
+# Two cycles costs at most five minutes on a real stop and removes an
+# entire class of exit that should never have fired. Set to 1 to restore
+# the old immediate behaviour.
+OPTIONS_STOP_CONFIRM_CYCLES = 2
+
 # Contract selection. Delta near 0.50 is at-the-money; lower delta
 # is cheaper but needs a bigger move to pay. The DTE window keeps
 # LOCKBOT away from the last two weeks of an option's life, where

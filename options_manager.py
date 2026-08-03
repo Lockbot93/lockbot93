@@ -134,6 +134,9 @@ class OptionPosition:
     highest_value: float = 0.0
     entry_order_id: str | None = None
     entry_filled: bool = False
+    # Consecutive cycles the stop condition has held. See decide_exit --
+    # a single wide-book bid print is not evidence of a 35% loss.
+    stop_strikes: int = 0
     exit_order_id: str | None = None
     exit_reason: str | None = None
     paper_trade: bool = True
@@ -366,12 +369,51 @@ def decide_exit(
         )
 
     if return_percent <= -stop_loss_percent:
+        # The stop must hold across consecutive cycles before it fires.
+        #
+        # On 2026-08-03 an EWZ call stopped out at -8.1% against a -35%
+        # stop. It was not a market move: the sell went out as a limit at
+        # the stop price of 0.48 and filled at 0.68, and no trade in that
+        # window printed below 0.57. The quote feed had simply shown a bid
+        # of 0.48 while the contract was worth about 0.70.
+        #
+        # Measuring the live book explains it. Option quotes here are
+        # fresh -- 2 to 6 seconds old -- but very wide and jittery: 16% to
+        # 28% spreads, with the bid swinging 8% between polls seconds
+        # apart. A single bid print is therefore not evidence of anything,
+        # and the last trade is useless as a cross-check because on a
+        # contract this illiquid it can be days old.
+        #
+        # Requiring the condition to survive a second look costs at most
+        # one cycle of delay on a genuine stop, and removes an entire class
+        # of exit that never should have happened. Confirmation is reset
+        # the moment price recovers, so only a persistent loss fires it.
+        required = max(1, getattr(config, "OPTIONS_STOP_CONFIRM_CYCLES", 2))
+        position.stop_strikes += 1
+
+        if position.stop_strikes < required:
+            return ExitDecision(
+                False,
+                HOLD,
+                f"Down {return_percent:.1%}, past the "
+                f"-{stop_loss_percent:.0%} stop, but on a book this wide one "
+                f"reading is not enough. Confirmation "
+                f"{position.stop_strikes}/{required}; exiting next cycle if "
+                "it holds.",
+                return_percent,
+            )
+
         return ExitDecision(
             True,
             STOP_LOSS,
-            f"Down {return_percent:.1%} against a -{stop_loss_percent:.0%} stop.",
+            f"Down {return_percent:.1%} against a -{stop_loss_percent:.0%} "
+            f"stop, confirmed over {position.stop_strikes} cycles.",
             return_percent,
         )
+
+    # Price recovered into the band, so any part-built confirmation is
+    # discarded. Two bad prints an hour apart must not add up to an exit.
+    position.stop_strikes = 0
 
     return ExitDecision(
         False,
@@ -1293,9 +1335,18 @@ def _self_test() -> int:
     check("takes profit exactly at target",
           at_target.should_exit and at_target.reason == TAKE_PROFIT, at_target.reason)
 
-    loser = decide_exit(make(), 45.0, now=now, today=today, **rules)
-    check("stops out at -36%", loser.should_exit and loser.reason == STOP_LOSS,
-          loser.reason)
+    # A stop now needs confirming, so this takes two looks at the same
+    # position rather than one at a fresh one. Reusing make() here would
+    # hand each call a position with no strike history and never confirm.
+    loser = make()
+    first_look = decide_exit(loser, 45.0, now=now, today=today, **rules)
+    check("a single -36% reading does not sell yet",
+          not first_look.should_exit, first_look.reason)
+
+    second_look = decide_exit(loser, 45.0, now=now, today=today, **rules)
+    check("stops out at -36% once confirmed",
+          second_look.should_exit and second_look.reason == STOP_LOSS,
+          second_look.reason)
 
     near_stop = decide_exit(make(), 46.0, now=now, today=today, **rules)
     check("holds just inside the stop", not near_stop.should_exit, near_stop.reason)
@@ -1484,6 +1535,75 @@ def _self_test() -> int:
         "a naive entry timestamp does not raise",
         entry_pending_too_long(naive, now=reference) is True,
     )
+
+    print()
+    print("A stop must survive a second look")
+
+    def at(value):
+        """decide_exit against a live value, with the real thresholds."""
+        return decide_exit(
+            confirming,
+            value,
+            now=datetime(2026, 8, 3, 14, 0, tzinfo=timezone.utc),
+            today=date(2026, 8, 3),
+            take_profit_percent=0.50,
+            stop_loss_percent=0.35,
+            max_hold_days=10,
+            min_dte_exit=14,
+        )
+
+    # The real EWZ trade: entry 74, stop level 48.10. A single quoted bid
+    # of 48 while the contract traded at 70.
+    confirming = make()
+    confirming.entry_debit = 74.0
+    confirming.entry_time = "2026-08-01T14:00:00+00:00"
+    confirming.expiration = "2026-08-21"
+
+    first = at(48.0)
+    check("one bad print does not sell", first.should_exit is False, first.reason)
+    check("but it is counted", confirming.stop_strikes == 1,
+          str(confirming.stop_strikes))
+    check("and it says so", "onfirmation 1/2" in first.detail, first.detail)
+
+    # Next cycle the book prints sensibly again — as it did in reality,
+    # where trades were happening at 0.70.
+    recovered = at(70.0)
+    check("a recovery holds", recovered.should_exit is False)
+    check("and clears the confirmation", confirming.stop_strikes == 0,
+          str(confirming.stop_strikes))
+
+    # Two bad prints an hour apart must not add up to an exit.
+    at(48.0)
+    at(70.0)
+    check("confirmation does not accumulate across recoveries",
+          confirming.stop_strikes == 0, str(confirming.stop_strikes))
+
+    # A genuine, persistent loss still exits — one cycle later.
+    genuine = at(45.0)
+    check("a real loss is held once", genuine.should_exit is False)
+    second = at(44.0)
+    check("and sold on confirmation", second.should_exit is True, second.reason)
+    check("recorded as a stop", second.reason == STOP_LOSS, second.reason)
+    check("saying it was confirmed", "confirmed over 2" in second.detail,
+          second.detail)
+
+    # Take profit and the time rules must NOT wait for confirmation.
+    quick = make()
+    quick.entry_debit = 74.0
+    quick.entry_time = "2026-08-01T14:00:00+00:00"
+    quick.expiration = "2026-08-21"
+    confirming = quick
+    profit = at(120.0)
+    check("take profit is immediate", profit.should_exit is True, profit.reason)
+
+    expiring = make()
+    expiring.entry_debit = 74.0
+    expiring.entry_time = "2026-08-01T14:00:00+00:00"
+    expiring.expiration = "2026-08-10"
+    confirming = expiring
+    near = at(48.0)
+    check("near-expiry still exits immediately",
+          near.should_exit is True and near.reason == NEAR_EXPIRY, near.reason)
 
     print()
     print("Fill price sign handling")
