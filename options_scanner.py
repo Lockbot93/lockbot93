@@ -753,6 +753,35 @@ def run_options_scanner() -> OptionsScannerSummary:
                     f"{candidate['strategy']}"
                 )
 
+        # Record every ranked candidate, taken or not.
+        #
+        # Quality was only ever logged for orders that were SUBMITTED, so
+        # the distribution of what LOCKBOT passes over is invisible. That
+        # makes a minimum-quality gate unsettable: on 2026-08-03 it bought
+        # three setups scoring 31.8, 36.5 and 36.8 out of 100 with nothing
+        # to say whether those were poor or simply normal for this
+        # universe. Without the population there is no way to know whether
+        # a floor of 50 is prudent or silently stops all trading.
+        #
+        # These rows carry no contract, because a candidate is scored
+        # before contract selection runs. They exist to build the
+        # distribution, and are marked CANDIDATE so they never count as
+        # decisions in the P&L.
+        for rank, candidate in enumerate(candidates, start=1):
+            append_shadow_row({
+                "timestamp": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "underlying": candidate["symbol"],
+                "strategy": candidate["strategy"],
+                "regime": candidate["regime"],
+                "signal": candidate["signal"],
+                "confidence": candidate["score"],
+                "quality": round(candidate["quality"], 2),
+                "action": "CANDIDATE",
+                "reason": f"rank {rank} of {len(candidates)}",
+            })
+
         # ---- Contract selection and entry
         entries_this_cycle = 0
 
