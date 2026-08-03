@@ -174,6 +174,102 @@ def fetch_last_cycle() -> float | None:
         return None
 
 
+def entry_gates(state: dict) -> list[dict]:
+    """What is currently stopping LOCKBOT opening a new position.
+
+    The most common question anyone asks a trading display is "why hasn't
+    it done anything?", and until now answering it meant checking the
+    config file, two risk-state files and the position count separately.
+    A quiet bot and a blocked bot look identical from the outside; this
+    makes them look different.
+
+    Every gate here is read from live state rather than assumed, and a
+    gate whose data is missing reports as unknown rather than as open --
+    the same rule day_trade_tracker.py follows, because reading a missing
+    value as permission to trade is how the old PDT bug worked.
+    """
+
+    scanner = state.get("scanner_state", {}) or {}
+    risk = state.get("risk_state", {}) or {}
+    config_snapshot = state.get("configuration", {}) or {}
+    options_held = len(state.get("option_positions_tracked", {}) or {})
+
+    gates: list[dict] = []
+
+    # Kill switch and daily loss halt everything, so they come first.
+    if risk.get("kill_switch_active"):
+        gates.append({
+            "label": "KILL SWITCH",
+            "blocking": True,
+            "detail": str(risk.get("kill_switch_reason") or "engaged"),
+        })
+
+    if scanner.get("daily_loss_limit_hit"):
+        gates.append({
+            "label": "DAILY LOSS LIMIT",
+            "blocking": True,
+            "detail": f"{config_snapshot.get('max_daily_loss_percent', 0):.0%} reached",
+        })
+
+    # Equity entries are a deliberate switch, not a fault. It reads as
+    # blocking because it does block, but it is not coloured as an alarm.
+    try:
+        import lockbot_config as _cfg
+
+        equity_on = getattr(_cfg, "EQUITY_ENTRIES_ENABLED", True)
+        options_max = getattr(_cfg, "OPTIONS_MAX_OPEN_POSITIONS", 0)
+        options_max_trades = getattr(_cfg, "OPTIONS_MAX_TRADES_PER_DAY", 0)
+    except Exception:
+        equity_on, options_max, options_max_trades = None, 0, 0
+
+    if equity_on is False:
+        gates.append({
+            "label": "EQUITY ENTRIES",
+            "blocking": True,
+            "detail": "off by config",
+            "intended": True,
+        })
+    elif equity_on is None:
+        gates.append({
+            "label": "EQUITY ENTRIES",
+            "blocking": True,
+            "detail": "unknown",
+        })
+
+    if options_max and options_held >= options_max:
+        gates.append({
+            "label": "OPTIONS SLOTS",
+            "blocking": True,
+            "detail": f"{options_held}/{options_max} full",
+        })
+
+    # The options daily counter lives in its own file, owned by
+    # options_scanner.py.
+    try:
+        path = getattr(_cfg, "OPTIONS_RISK_STATE_FILE", None)
+        today = datetime.now().astimezone().date().isoformat()
+
+        if path and Path(path).exists():
+            raw = json.loads(Path(path).read_text(encoding="utf-8") or "{}")
+            used = int(raw.get("trades_submitted_today", 0) or 0)
+
+            # The counter resets on first read of a new date, so a stale
+            # date means zero used today, not the number written.
+            if raw.get("trade_date") != today:
+                used = 0
+
+            if options_max_trades and used >= options_max_trades:
+                gates.append({
+                    "label": "OPTIONS TRADES",
+                    "blocking": True,
+                    "detail": f"{used}/{options_max_trades} today",
+                })
+    except Exception:
+        pass
+
+    return gates
+
+
 def fetch_live_positions() -> dict[str, dict]:
     """
     Position marks and their live bracket levels, in one broker round trip.
@@ -676,6 +772,25 @@ _TEMPLATE = """<!doctype html>
                        border-top: 4px solid var(--ink); }
   .gauge-empty { font-size: 10px; letter-spacing: .25em; color: var(--ink-faint); }
 
+  /* ---- Entry gates ---- */
+  .gates { display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+           padding: 12px 16px; margin-bottom: 20px;
+           border: 1px solid rgba(255,168,61,.22);
+           background: rgba(255,168,61,.05);
+           clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px)); }
+  .gates.open { border-color: rgba(34,229,255,.16); background: rgba(34,229,255,.035); }
+  .gates-k { font-size: 9px; letter-spacing: .3em; color: var(--ink-faint);
+             margin-right: 4px; }
+  .gate { display: inline-flex; align-items: baseline; gap: 7px;
+          padding: 4px 10px; border: 1px solid rgba(120,150,170,.25);
+          background: rgba(10,20,28,.5); }
+  .gate b { font-size: 10px; letter-spacing: .16em; color: var(--ink); }
+  .gate em { font-style: normal; font-size: 10px; color: var(--ink-faint); }
+  .gate.halt { border-color: rgba(255,60,90,.5); }
+  .gate.halt b { color: var(--bad); }
+  .gate.ok { border-color: rgba(34,229,255,.3); }
+  .gate.ok b { color: var(--good); }
+
   .positions { margin-top: 4px; }
 
   /* ---- Radar sweep behind the orb ----
@@ -866,6 +981,8 @@ _TEMPLATE = """<!doctype html>
       __EDGE_BAR__
     </div>
   </div>
+
+  __GATES__
 
   <section class="positions">
     <h2>OPEN POSITIONS</h2>
@@ -1448,7 +1565,34 @@ def render(
             f"</div>"
         )
 
+    # ---- Entry gates ----------------------------------------------------
+    # Silence is ambiguous: a bot with nothing to trade and a bot that is
+    # blocked look identical. This says which. Deliberate switches are
+    # shown in the neutral tone, genuine halts in red -- "equity entries
+    # off by config" is a decision, "kill switch engaged" is not.
+    gates = view.get("gates") or []
+
+    if gates:
+        chips = "".join(
+            f'<span class="gate{"" if g.get("intended") else " halt"}">'
+            f'<b>{html.escape(g["label"])}</b>'
+            f'<em>{html.escape(g["detail"])}</em>'
+            f"</span>"
+            for g in gates
+        )
+        gates_html = (
+            f'<div class="gates"><span class="gates-k">ENTRIES BLOCKED</span>'
+            f"{chips}</div>"
+        )
+    else:
+        gates_html = (
+            '<div class="gates open"><span class="gates-k">ENTRIES</span>'
+            '<span class="gate ok"><b>CLEAR</b>'
+            "<em>nothing blocking a new position</em></span></div>"
+        )
+
     replacements = {
+        "__GATES__": gates_html,
         "__PDT_PIPS__": pip_html,
         "__EDGE_BAR__": edge_html,
         "__OPTIONS_STOP__": options_stop_text,
@@ -1673,6 +1817,7 @@ def build_full_view(interval: int) -> dict:
     view["equity_history"] = fetch_equity_history()
     view["clock"] = fetch_market_clock()
     view["last_cycle"] = fetch_last_cycle()
+    view["gates"] = entry_gates(state)
 
     try:
         from lockbot_incidents import collect as collect_incidents
@@ -2060,6 +2205,52 @@ def _self_test() -> int:
         "IDLE · MARKET SHUT" in losing,
     )
     check("a real stall still reads as NO CYCLE", "NO CYCLE" in losing)
+
+    print()
+    print("Entry gates explain silence")
+
+    # The equity-entries gate reads live config, not the state passed in,
+    # so with EQUITY_ENTRIES_ENABLED False it fires on any input. That is
+    # correct -- it really is blocking -- so this asserts the shape rather
+    # than expecting an empty list the current config cannot produce.
+    baseline = entry_gates({})
+    check(
+        "every gate names itself and says why",
+        all(g.get("label") and g.get("detail") for g in baseline),
+        str(baseline),
+    )
+    check(
+        "a config switch is marked intended, not alarming",
+        all(
+            g.get("intended")
+            for g in baseline
+            if g["label"] == "EQUITY ENTRIES"
+        ),
+        str(baseline),
+    )
+
+    # A kill switch is a halt, not a decision.
+    killed = entry_gates({"risk_state": {
+        "kill_switch_active": True, "kill_switch_reason": "daily loss",
+    }})
+    check("the kill switch is reported",
+          any(g["label"] == "KILL SWITCH" for g in killed), str(killed))
+    check("and is not marked intended",
+          not any(g.get("intended") for g in killed if g["label"] == "KILL SWITCH"))
+
+    loss = entry_gates({"scanner_state": {"daily_loss_limit_hit": True}})
+    check("the daily loss limit is reported",
+          any(g["label"] == "DAILY LOSS LIMIT" for g in loss))
+
+    # Full option slots block entries without anything being wrong.
+    full = entry_gates({"option_positions_tracked": {"a": {}, "b": {}}})
+    check("full option slots are reported",
+          any(g["label"] == "OPTIONS SLOTS" for g in full), str(full))
+
+    # Rendering: a blocked bot must say so, a clear one must say that too.
+    blocked_html = render(build_view(state()), live=True).replace("&nbsp;", " ")
+    check("the strip renders either way",
+          "ENTRIES" in blocked_html and 'class="gate' in blocked_html)
 
     print()
 
