@@ -704,14 +704,12 @@ _LIVE_STYLE = """
     50%     { transform: scale(1.12); opacity: 1; }
   }
 
-  /* Speech waveform.
-     Drawn on a canvas from the WordBoundary timings lockbot_voice.py
-     publishes, so the peaks land on the words actually being spoken. The
-     CSS bars this replaces ran at a fixed 0.7s cycle whatever was said —
-     it looked alive and told you nothing. */
-  .wave { display: none; margin-top: 12px; width: 100%; height: 44px; }
-  body[data-voice="speaking"] .wave { display: block; }
-  body[data-voice="listening"] .wave { display: block; opacity: .5; }
+  /* Speech orb.
+     A circle whose radius is modulated by the WordBoundary timings
+     lockbot_voice.py publishes, so it deforms on the words actually being
+     spoken. Always visible — it breathes slowly when idle rather than
+     appearing and vanishing, which reads as a system that is on. */
+  .wave { display: block; margin: 14px auto 0; width: 200px; height: 200px; }
 
   .voice-line { text-align: center; margin-top: 10px; font-size: 10px;
                 letter-spacing: .22em; color: var(--ink-faint); min-height: 14px; }
@@ -794,6 +792,11 @@ function amplitudeAt(t) {
   return Math.min(1, total);
 }
 
+// Smoothed level, so the orb swells and settles rather than snapping
+// between frames. Speech amplitude is spiky at word boundaries; a circle
+// that tracked it exactly would flicker instead of breathe.
+let level = 0;
+
 function drawWave() {
   const canvas = document.getElementById("wave");
 
@@ -801,39 +804,73 @@ function drawWave() {
     const ctx = canvas.getContext("2d");
     const w = canvas.width;
     const h = canvas.height;
-    const mid = h / 2;
+    const cx = w / 2;
+    const cy = h / 2;
     ctx.clearRect(0, 0, w, h);
 
     const now = performance.now() / 1000;
     const elapsed = speech.active ? now - speech.localStart : 0;
     const live = speech.active && elapsed <= speech.duration + 0.4;
 
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = live ? "#22e5ff" : "rgba(120,150,170,.35)";
-    ctx.shadowBlur = live ? 12 : 0;
-    ctx.shadowColor = "#22e5ff";
-    ctx.beginPath();
+    const target = live && elapsed >= 0 ? amplitudeAt(elapsed) : 0;
+    // Rises quickly, falls slowly — speech attacks fast and decays.
+    level += (target - level) * (target > level ? 0.35 : 0.08);
 
-    // A window of the utterance around the playhead, so the wave scrolls
-    // past rather than redrawing the whole reply every frame.
-    const WINDOW = 1.6;
+    const base = Math.min(w, h) * 0.26;
+    const swell = base * (1 + level * 0.30);
+    const colour = live ? "34,229,255" : "120,150,170";
 
-    for (let x = 0; x <= w; x++) {
-      const t = elapsed - WINDOW / 2 + (x / w) * WINDOW;
-      let amp = live && t >= 0 ? amplitudeAt(t) : 0;
-
-      // Idle breathing so the line is never dead flat.
-      if (!live) amp = 0.05 + 0.03 * Math.sin(now * 2 + x / 40);
-
-      // Carrier gives it the fine structure of a waveform; the envelope
-      // above decides how tall it gets.
-      const carrier = Math.sin((x / w) * 46 + now * 26);
-      const y = mid - amp * carrier * (h * 0.42);
-
-      if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    // Two faint echo rings that expand with the voice, giving the orb
+    // somewhere to push into.
+    for (let ring = 1; ring <= 2; ring++) {
+      ctx.beginPath();
+      ctx.strokeStyle = `rgba(${colour},${(live ? 0.20 : 0.08) / ring})`;
+      ctx.lineWidth = 1;
+      ctx.arc(cx, cy, swell + ring * (10 + level * 26), 0, Math.PI * 2);
+      ctx.stroke();
     }
 
+    // The orb itself. Radius is modulated around the circumference so it
+    // deforms rather than merely scaling — three lobes turning at
+    // different rates keeps it from looking mechanical.
+    ctx.beginPath();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = `rgba(${colour},${live ? 0.95 : 0.5})`;
+    ctx.shadowBlur = live ? 22 : 6;
+    ctx.shadowColor = `rgba(${colour},.85)`;
+
+    const STEPS = 180;
+
+    for (let i = 0; i <= STEPS; i++) {
+      const a = (i / STEPS) * Math.PI * 2;
+
+      const wobble =
+        Math.sin(a * 3 + now * 2.1) * 0.55 +
+        Math.sin(a * 5 - now * 1.4) * 0.30 +
+        Math.sin(a * 8 + now * 3.2) * 0.15;
+
+      // Idle keeps a slow breath so the circle is never a dead outline.
+      const idle = 0.045 * Math.sin(now * 1.6);
+      const r = swell * (1 + level * wobble * 0.28 + idle);
+
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r;
+
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+
+    ctx.closePath();
     ctx.stroke();
+
+    // Filled centre, brightening as it speaks.
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, swell);
+    glow.addColorStop(0, `rgba(${colour},${0.16 + level * 0.34})`);
+    glow.addColorStop(1, `rgba(${colour},0)`);
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(cx, cy, swell, 0, Math.PI * 2);
+    ctx.fill();
+
     ctx.shadowBlur = 0;
   }
 
@@ -1141,7 +1178,7 @@ def render(
         anchor = '  <div class="cols">'
 
         voice_block = (
-            '  <canvas class="wave" id="wave" width="640" height="88"></canvas>\n'
+            '  <canvas class="wave" id="wave" width="400" height="400"></canvas>\n'
             '  <div class="voice-line" id="voiceLine"></div>\n'
             '  <div class="heard" id="heard"></div>\n\n'
             + anchor
