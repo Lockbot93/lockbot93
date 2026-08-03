@@ -230,10 +230,79 @@ def check_portfolio_room(
 # Shadow log
 # ---------------------------------------------------------------------------
 
+def migrate_shadow_header(path: Any) -> bool:
+    """Rewrite the log when its header no longer matches SHADOW_COLUMNS.
+
+    csv.DictWriter writes values in SHADOW_COLUMNS order and never checks
+    the header already on disk. Adding the `quality` column on 2026-08-02
+    therefore appended 15 values under a 14-column header, and every field
+    after `confidence` shifted by one -- a quality score of 31.84 was read
+    back as the contract symbol.
+
+    Nothing raised. The rows looked plausible until something tried to
+    parse a debit and got an OCC symbol instead.
+
+    Rows shorter than the current schema are padded at the position the
+    new column occupies, so old entries stay readable rather than being
+    discarded. Returns True when the file was rewritten.
+    """
+
+    if not path.exists():
+        return False
+
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.reader(handle))
+    except OSError:
+        return False
+
+    if not rows or rows[0] == SHADOW_COLUMNS:
+        return False
+
+    old_header = rows[0]
+    body = rows[1:]
+    repaired = []
+
+    for row in body:
+        if not row:
+            continue
+
+        # A row already written in the NEW order sits under the OLD header
+        # only because the header was never updated. Length is what tells
+        # the two apart.
+        if len(row) == len(SHADOW_COLUMNS):
+            repaired.append(row)
+            continue
+
+        mapped = dict(zip(old_header, row))
+        repaired.append([mapped.get(column, "") for column in SHADOW_COLUMNS])
+
+    temporary = path.with_suffix(".migrating")
+
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(SHADOW_COLUMNS)
+        writer.writerows(repaired)
+
+    os.replace(temporary, path)
+
+    print(
+        f"options shadow log migrated: header had {len(old_header)} columns, "
+        f"schema has {len(SHADOW_COLUMNS)}. {len(repaired)} row(s) realigned."
+    )
+
+    return True
+
+
 def append_shadow_row(row: dict[str, Any]) -> None:
     """Append one decision to the shadow log, creating it when needed."""
 
     path = config.OPTIONS_SHADOW_FILE
+
+    # Bring the file up to the current schema before appending. Without
+    # this, adding a column silently misaligns every row written after it.
+    migrate_shadow_header(path)
+
     is_new = not path.exists()
 
     with path.open("a", newline="", encoding="utf-8") as handle:
@@ -687,7 +756,36 @@ def run_options_scanner() -> OptionsScannerSummary:
         # ---- Contract selection and entry
         entries_this_cycle = 0
 
+        # Underlyings LOCKBOT is already in, or already trying to get into.
+        #
+        # On 2026-08-03 the same IBIT 36/36.5 spread was submitted three
+        # times across three cycles. The first was cancelled on timeout,
+        # the second never filled, the third filled -- and nothing stopped
+        # a fourth, because a position whose order is still working does
+        # not look like a position yet. A signal that persists is a reason
+        # to keep holding, not a reason to buy again every five minutes.
+        #
+        # This also stops one underlying quietly occupying every slot,
+        # which would defeat the point of having more than one.
+        engaged = {
+            position.underlying.upper()
+            for position in positions.values()
+        }
+
+        if engaged:
+            print(f"Already engaged in: {', '.join(sorted(engaged))}")
+
         for candidate in candidates:
+            if candidate["symbol"].upper() in engaged:
+                print(
+                    f"\n{candidate['symbol']}: skipped — already holding or "
+                    "working an order on this underlying."
+                )
+                summary.rejection_reasons["ALREADY_ENGAGED"] = (
+                    summary.rejection_reasons.get("ALREADY_ENGAGED", 0) + 1
+                )
+                continue
+
             gate = check_portfolio_room(
                 open_positions=len(positions),
                 trades_today=risk_state["trades_submitted_today"],
@@ -929,6 +1027,11 @@ def run_options_scanner() -> OptionsScannerSummary:
             append_shadow_row(
                 {**shadow_row, "action": "ORDER_SUBMITTED", "reason": str(order.id)}
             )
+
+            # Claim the underlying immediately. Without this a second
+            # candidate on the same name later in this very cycle would
+            # still get through, since `engaged` was built before the loop.
+            engaged.add(symbol.upper())
 
             print(f"  Order {order.id} submitted and tracked as {position_id}.")
 
@@ -1221,6 +1324,23 @@ def _self_test() -> int:
           broken == 50.0, str(broken))
 
     check("quality is logged in the shadow columns", "quality" in SHADOW_COLUMNS)
+
+    print()
+    print("One underlying, one position")
+
+    # The 2026-08-03 IBIT case: an entry whose order is still working does
+    # not look like a position yet, so nothing stopped a second attempt.
+    engaged = {"IBIT", "PCG"}
+    check("an engaged underlying is skipped", "IBIT" in engaged)
+    check(
+        "a fresh underlying is not",
+        "EWZ" not in engaged,
+    )
+
+    # Claiming within the cycle matters: two candidates on one name in the
+    # same scan would otherwise both submit.
+    engaged.add("EWZ")
+    check("claiming inside the cycle blocks the second", "EWZ" in engaged)
 
     print()
     print("Options buying power")

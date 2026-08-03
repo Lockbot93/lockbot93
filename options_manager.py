@@ -865,11 +865,123 @@ def run_options_manager() -> OptionsManagerSummary:
         now = datetime.now(timezone.utc)
         today = now.date()
 
+        # ---- Repair: more tracked entries than the broker actually holds
+        #
+        # entry_filled is sticky once set, so an entry wrongly marked
+        # filled stays wrong forever. That is how the duplicate IBIT spread
+        # survived: both entries shared a long_symbol, the filled one
+        # satisfied the symbol check for both, and neither was ever
+        # re-examined.
+        #
+        # Quantity is the arbiter. If three entries claim a contract the
+        # broker holds one of, at least two are phantoms, and the order id
+        # says which. This runs before anything else so the counts every
+        # later step depends on are honest.
+        by_symbol: dict[str, list[str]] = {}
+
+        for position_id, position in positions.items():
+            by_symbol.setdefault(position.long_symbol, []).append(position_id)
+
+        for symbol, ids in by_symbol.items():
+            broker_qty = 0
+
+            if symbol in broker_positions:
+                try:
+                    broker_qty = abs(int(float(broker_positions[symbol].qty)))
+                except (TypeError, ValueError):
+                    broker_qty = 1
+
+            if len(ids) <= broker_qty:
+                continue
+
+            print(
+                f"{symbol}: {len(ids)} tracked entries but the broker holds "
+                f"{broker_qty}. Resolving by order id."
+            )
+
+            for position_id in ids:
+                position = positions[position_id]
+
+                if position.entry_order_id is None:
+                    continue
+
+                if classify_entry_order(trading_client, position) == "FILLED":
+                    continue
+
+                # This entry's own order did not fill. Another order put
+                # the contract in the account.
+                refunded = refund_daily_trade_slot()
+
+                record_completed_option_trade(
+                    position,
+                    exit_credit=position.entry_debit,
+                    exit_time=now,
+                    exit_reason="ENTRY_NOT_FILLED",
+                )
+
+                print(
+                    f"  {position.underlying}: order {position.entry_order_id} "
+                    "never filled. Removed as a phantom."
+                    + (f" Daily count returned to {refunded}."
+                       if refunded is not None else "")
+                )
+
+                del positions[position_id]
+                summary.entries_unfilled += 1
+
         # ---- Reconcile: anything we track that the broker no longer holds
         for position_id in list(positions):
             position = positions[position_id]
 
-            if position.long_symbol in broker_positions:
+            # Presence of the symbol is NOT proof this entry filled.
+            #
+            # On 2026-08-03 LOCKBOT submitted the same IBIT 36/36.5 spread
+            # twice. One filled, one sat at "new" and never did. Both
+            # tracked entries carry the same long_symbol, so the filled
+            # one satisfied this check for both and the unfilled entry was
+            # marked filled too -- inflating the position count, double
+            # counting $23 of premium against the ceiling, and disabling
+            # the timeout that would otherwise have cancelled it.
+            #
+            # The order id distinguishes them and was already on the
+            # position. Ask the order, and fall back to the symbol only
+            # when there is no order to ask.
+            symbol_present = position.long_symbol in broker_positions
+
+            if symbol_present and not position.entry_filled:
+                verdict = classify_entry_order(trading_client, position)
+
+                if verdict == "WORKING":
+                    # Someone else's fill, not this entry's. Leave it
+                    # pending so the timeout can still reach it.
+                    summary.entries_pending += 1
+                    print(
+                        f"{position.underlying}: {position.long_symbol} is held, "
+                        "but THIS entry's order is still working. Another "
+                        "order filled it. Holding, journaling nothing."
+                    )
+                    continue
+
+                if verdict == "DEAD":
+                    refunded = refund_daily_trade_slot()
+                    record_completed_option_trade(
+                        position,
+                        exit_credit=position.entry_debit,
+                        exit_time=now,
+                        exit_reason="ENTRY_NOT_FILLED",
+                    )
+                    print(
+                        f"{position.underlying}: entry order never filled "
+                        f"though {position.long_symbol} is held by another "
+                        "entry. Journaled as ENTRY_NOT_FILLED."
+                        + (f" Daily count returned to {refunded}."
+                           if refunded is not None else "")
+                    )
+                    del positions[position_id]
+                    summary.entries_unfilled += 1
+                    continue
+
+            if symbol_present:
                 # Seen at the broker: the entry definitively filled. Record
                 # that, so a later absence is read as "closed" rather than
                 # re-checked against an order that has long since aged out.
