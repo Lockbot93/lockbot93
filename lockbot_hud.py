@@ -1120,14 +1120,40 @@ def render(
         # insertion before a known marker, rather than reshaping the DOM —
         # the fragile version of this had unbalanced quotes and invented
         # closing tags.
+        # The anchor must be a string that actually appears in the template.
+        #
+        # This previously inserted before '  <div class="tiles">', which does
+        # not exist -- the template has a .tiles CSS rule but no element
+        # using it. str.replace() on a missing needle is a silent no-op, so
+        # the speech indicators were never rendered at all and nothing ever
+        # said so. The bars were "working" for weeks in the sense that the
+        # CSS was correct and the markup was absent.
+        #
+        # The anchor must also still be present at THIS point in render().
+        # __SPARKLINE__ looked like a good marker and was not: it is a
+        # placeholder already substituted by the time this runs, so it
+        # failed exactly as silently as the previous attempt.
+        #
+        # '  <div class="cols">' is literal markup rather than a
+        # placeholder, so nothing rewrites it. The waveform lands directly
+        # above the positions and system columns. The check below turns any
+        # future mismatch into a visible failure.
+        anchor = '  <div class="cols">'
+
         voice_block = (
             '  <canvas class="wave" id="wave" width="640" height="88"></canvas>\n'
             '  <div class="voice-line" id="voiceLine"></div>\n'
             '  <div class="heard" id="heard"></div>\n\n'
-            '  <div class="tiles">'
+            + anchor
         )
 
-        output = output.replace('  <div class="tiles">', voice_block, 1)
+        if anchor not in output:
+            print(
+                "HUD WARNING: speech-indicator anchor not found; the "
+                "waveform will not render. The template changed."
+            )
+        else:
+            output = output.replace(anchor, voice_block, 1)
 
     return output
 
@@ -1515,6 +1541,35 @@ def _self_test() -> int:
         equity_positions_tracked={"<script>x</script>": {"entry_price": 1.0}},
         pending_equity_trades=[])))
     check("symbols are escaped", "<script>x</script>" not in hostile)
+
+    print()
+    print("Speech waveform is actually in the markup")
+
+    # The bug this guards: the insertion anchored on a marker that was not
+    # in the template, str.replace() did nothing, and the speech display
+    # was absent for weeks while the CSS for it looked perfectly correct.
+    # Checking the CSS or the script is not enough -- the ELEMENT has to
+    # be there.
+    live_html = render(build_view(state()), live=True)
+
+    check("the canvas element is rendered", 'id="wave"' in live_html)
+    check("with the wave class the CSS targets", 'class="wave"' in live_html)
+    check("the voice line is rendered", 'id="voiceLine"' in live_html)
+    check("the heard line is rendered", 'id="heard"' in live_html)
+    check("the drawing code is included", "drawWave" in live_html)
+    check("it reads word timings", "amplitudeAt" in live_html)
+    check(
+        "the old fixed-cycle bars are gone",
+        'class="bars"' not in live_html,
+    )
+
+    # The static render deliberately omits it. That file is written by
+    # --watch and has no polling script, so drawWave never runs and a
+    # canvas there would be dead markup showing a frozen line. Asserting
+    # the absence keeps the two paths honest about differing on purpose.
+    static_html = render(build_view(state()))
+    check("static render omits the canvas", 'id="wave"' not in static_html)
+    check("because it has no live script", "drawWave" not in static_html)
 
     print()
 

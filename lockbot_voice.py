@@ -217,11 +217,25 @@ def get_voice_state() -> dict:
     if age > 30:
         return {"state": STATE_IDLE, "detail": "", "age": round(age, 1)}
 
-    return {
+    view = {
         "state": data.get("state", STATE_IDLE),
         "detail": data.get("detail", ""),
         "age": round(age, 1),
     }
+
+    # Pass the speech envelope through. This function rebuilt the payload
+    # field by field, so `words` and `at` were dropped here and the HUD
+    # received a state it could label but not draw -- the canvas rendered,
+    # the timings never arrived, and the wave sat flat.
+    #
+    # `at` is what anchors the playhead: the HUD re-anchors only when it
+    # changes, so without it every poll would restart the animation.
+    if data.get("words"):
+        view["words"] = data["words"]
+        view["duration"] = data.get("duration", 0)
+        view["at"] = data.get("at", 0)
+
+    return view
 
 
 # ---------------------------------------------------------------------------
