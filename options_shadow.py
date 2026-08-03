@@ -79,11 +79,17 @@ RESOLVED_COLUMNS = [
     "timestamp",
     "underlying",
     "long_symbol",
+    "short_symbol",
     "strategy",
     "action",
     "debit",
     "quality",
     "spread_percent",
+    # high_low for single legs, close_only for verticals. Recorded because
+    # the two are not equally sensitive: close_only cannot see a level
+    # touched and given back inside a bar, so it undercounts both targets
+    # and stops. A reader comparing the two must know which is which.
+    "method",
     "target_price",
     "stop_price",
     "outcome",
@@ -190,33 +196,132 @@ def replay_bars(
     return Replay(OUTCOME_UNRESOLVED, checked, None, None)
 
 
+def align_closes(long_bars: Any, short_bars: Any) -> list[tuple[Any, float, float]]:
+    """Pair the two legs' bars by exact timestamp.
+
+    Only bars present on BOTH legs are returned. A spread's value is the
+    difference between two prices at the same instant; a long-leg bar with
+    no matching short-leg bar cannot be priced at all, and filling the gap
+    with the nearest neighbour would reintroduce exactly the fabrication
+    this module refuses to make.
+    """
+
+    shorts = {}
+
+    for bar in short_bars:
+        stamp = getattr(bar, "timestamp", None)
+
+        if stamp is not None:
+            shorts[stamp] = float(bar.close)
+
+    paired = []
+
+    for bar in long_bars:
+        stamp = getattr(bar, "timestamp", None)
+
+        if stamp is None or stamp not in shorts:
+            continue
+
+        paired.append((stamp, float(bar.close), shorts[stamp]))
+
+    return paired
+
+
+def replay_spread(
+    paired: list[tuple[Any, float, float]],
+    *,
+    debit: float,
+    max_hold_days: int | None = None,
+    start: datetime | None = None,
+) -> Replay:
+    """Score a vertical from synchronised CLOSING prices only.
+
+    WHY CLOSES AND NOT HIGH/LOW
+
+    A single-leg position can be replayed from its own high and low --
+    those are prices that genuinely traded. A spread cannot. Its value is
+    long minus short, and the long leg's high did not occur at the same
+    moment as the short leg's low, so `max(long) - min(short)` is a number
+    that never existed. Scoring the first version of this module that way
+    marked the ASHR and JD spreads as TARGET on their opening bar, when
+    the broker had recorded both as stop losses.
+
+    Closing prices at a shared timestamp are simultaneous and therefore
+    real. The cost is sensitivity: a target touched and given back inside
+    a five-minute bar is invisible here, so this UNDERCOUNTS both targets
+    and stops. That bias is accepted deliberately -- it errs toward
+    "unresolved" rather than toward inventing a result, which is the same
+    standard the rest of this module holds to.
+    """
+
+    if debit <= 0:
+        return Replay(OUTCOME_NO_DATA, 0, None, None)
+
+    target, stop = exit_levels(debit)
+    hold_days = (
+        max_hold_days
+        if max_hold_days is not None
+        else getattr(config, "OPTIONS_MAX_HOLD_DAYS", 10)
+    )
+
+    checked = 0
+
+    for stamp, long_close, short_close in paired:
+        if start is not None and stamp is not None:
+            moment = stamp
+
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+
+            if moment < start:
+                continue
+
+            if hold_days and moment > start + timedelta(days=hold_days):
+                return Replay(OUTCOME_EXPIRED, checked, None, None)
+
+        checked += 1
+
+        value = (long_close - short_close) * CONTRACT_MULTIPLIER
+
+        # A debit spread cannot be worth less than zero. A negative here
+        # is a stale or crossed quote on one leg, not a loss.
+        if value < 0:
+            continue
+
+        if value >= target:
+            gain = target - debit
+            return Replay(OUTCOME_TARGET, checked, gain, gain / debit * 100.0)
+
+        if value <= stop:
+            loss = stop - debit
+            return Replay(OUTCOME_STOP, checked, loss, loss / debit * 100.0)
+
+    if checked == 0:
+        return Replay(OUTCOME_NO_DATA, 0, None, None)
+
+    return Replay(OUTCOME_UNRESOLVED, checked, None, None)
+
+
 def can_replay(decision: dict[str, Any]) -> tuple[bool, str]:
     """Whether this decision can be scored honestly. Returns (ok, reason).
 
-    Single-leg positions can: the contract's own bars are exactly what the
-    position was worth. Verticals cannot, and the first version of this
-    module got that badly wrong.
+    Both structures are now scorable, but by different methods.
 
-    A bull call spread is worth long minus short. Replaying the long leg
-    alone values a position at several times its real price, so every
-    spread cleared its +50% target on the first bar it saw. That produced
-    a 100% win rate across nine decisions, including ASHR and JD -- both
-    of which had actually stopped out for real losses of $11 and $8. The
-    replay contradicted the broker's own record.
+    A single leg is replayed from its own high and low -- prices that
+    genuinely traded. A vertical is replayed from synchronised CLOSING
+    prices via replay_spread, because its value is long minus short and
+    the long leg's high never coincided with the short leg's low.
 
-    Combining two legs' OHLC bars does not fix it either. The long leg's
-    high and the short leg's low did not occur at the same instant, so
-    max(long) - min(short) is an upper bound on a price that never
-    existed. It would inflate the result the same way, just less visibly.
+    The first version of this module ignored that and priced spreads from
+    the long leg alone. Every spread then cleared its +50% target on its
+    opening bar, producing a 100% win rate across nine decisions --
+    including ASHR and JD, both of which the broker had recorded as stop
+    losses. The replay contradicted the account statement.
 
-    Scoring these correctly needs synchronised quotes for both legs, which
-    the free feed does not provide. So they are marked unsupported and
-    excluded from every statistic. An unmeasured decision is honest; a
-    confidently wrong one is not.
+    This function is kept as the single place that decides scorability,
+    so a future structure that genuinely cannot be priced has somewhere
+    to be refused rather than guessed at.
     """
-
-    if (decision.get("short_symbol") or "").strip():
-        return False, "vertical spread: both legs cannot be priced together"
 
     return True, ""
 
@@ -345,24 +450,49 @@ def resolve_all(*, verbose: bool = True) -> list[dict[str, Any]]:
             resolved.append(_unresolved_row(decision, symbol, debit, stamp))
             continue
 
-        try:
-            response = client.get_option_bars(
+        short_symbol = (decision.get("short_symbol") or "").strip()
+        wanted = [symbol] + ([short_symbol] if short_symbol else [])
+
+        def fetch(request_symbols):
+            return client.get_option_bars(
                 OptionBarsRequest(
-                    symbol_or_symbols=symbol,
+                    symbol_or_symbols=request_symbols,
                     timeframe=TimeFrame(5, TimeFrameUnit.Minute),
                     start=entered,
                     end=window_end,
                 )
             )
+
+        try:
+            response = fetch(wanted)
             bars = list(response[symbol]) if symbol in response.data else []
+            short_bars = (
+                list(response[short_symbol])
+                if short_symbol and short_symbol in response.data
+                else []
+            )
 
         except Exception as error:
             if verbose:
                 print(f"  {symbol}: bar fetch failed "
                       f"({type(error).__name__}: {error})")
             bars = []
+            short_bars = []
 
-        replay = replay_bars(bars, debit=debit, start=entered)
+        if short_symbol:
+            # Verticals are priced from synchronised closes, never from
+            # the long leg alone. See replay_spread for why.
+            paired = align_closes(bars, short_bars)
+            replay = replay_spread(paired, debit=debit, start=entered)
+            method = "close_only"
+
+            if verbose and not paired:
+                print(f"  {symbol}: no overlapping bars with "
+                      f"{short_symbol}; cannot price the spread")
+        else:
+            replay = replay_bars(bars, debit=debit, start=entered)
+            method = "high_low"
+
         target, stop = exit_levels(debit)
 
         resolved.append({
@@ -374,6 +504,8 @@ def resolve_all(*, verbose: bool = True) -> list[dict[str, Any]]:
             "debit": round(debit, 2),
             "quality": decision.get("quality", ""),
             "spread_percent": decision.get("spread_percent", ""),
+            "short_symbol": short_symbol,
+            "method": method,
             "target_price": round(target, 2),
             "stop_price": round(stop, 2),
             "outcome": replay.outcome,
@@ -576,36 +708,92 @@ def _self_test() -> int:
     )
 
     print()
-    print("Spreads are refused, not guessed")
+    print("Spreads price from synchronised closes")
 
-    single = {"long_symbol": "EWZ260821C00036500", "short_symbol": ""}
-    ok, _ = can_replay(single)
-    check("a single-leg call is replayable", ok is True)
+    class Bar:
+        def __init__(self, close, minutes=0, high=None, low=None):
+            self.close = close
+            self.high = high if high is not None else close
+            self.low = low if low is not None else close
+            self.timestamp = datetime(
+                2026, 7, 30, 14, 0, tzinfo=timezone.utc
+            ) + timedelta(minutes=minutes)
 
-    # The real ASHR spread, which the first version of this module scored
-    # as a TARGET on bar one while the broker recorded a $11 stop loss.
-    ashr = {
-        "long_symbol": "ASHR260821C00034500",
-        "short_symbol": "ASHR260821C00035500",
-    }
-    ok, reason = can_replay(ashr)
-    check("the ASHR spread is refused", ok is False, reason)
-    check("and says why", "spread" in reason.lower(), reason)
-
-    jd = {
-        "long_symbol": "JD260821C00032500",
-        "short_symbol": "JD260821C00033000",
-    }
-    check("the JD spread is refused", can_replay(jd)[0] is False)
-
+    # Legs must line up by exact timestamp.
+    longs = [Bar(1.15, 0), Bar(1.20, 5), Bar(1.30, 10)]
+    shorts = [Bar(0.91, 0), Bar(0.95, 5), Bar(0.99, 10)]
+    paired = align_closes(longs, shorts)
+    check("aligns bars by timestamp", len(paired) == 3, str(len(paired)))
     check(
-        "a whitespace-only short leg still counts as single-leg",
-        can_replay({"long_symbol": "X", "short_symbol": "   "})[0] is True,
+        "and pairs the right closes",
+        abs(paired[0][1] - 1.15) < 1e-9 and abs(paired[0][2] - 0.91) < 1e-9,
+    )
+
+    # A long-leg bar with no matching short bar cannot be priced.
+    check(
+        "unmatched bars are dropped, not guessed",
+        len(align_closes([Bar(1.15, 0), Bar(1.20, 5)], [Bar(0.91, 0)])) == 1,
+    )
+    check("no overlap yields nothing", align_closes(longs, []) == [])
+
+    start = datetime(2026, 7, 30, 14, 0, tzinfo=timezone.utc)
+
+    # A $24 debit spread: target $36, stop $15.60.
+    widening = align_closes(
+        [Bar(1.15, 0), Bar(1.50, 5)], [Bar(0.91, 0), Bar(1.00, 5)]
+    )
+    hit = replay_spread(widening, debit=24.0, start=start)
+    check("a widening spread reaches the target",
+          hit.outcome == OUTCOME_TARGET, hit.outcome)
+
+    narrowing = align_closes(
+        [Bar(1.15, 0), Bar(1.02, 5)], [Bar(0.91, 0), Bar(0.92, 5)]
+    )
+    stopped = replay_spread(narrowing, debit=24.0, start=start)
+    check("a narrowing spread reaches the stop",
+          stopped.outcome == OUTCOME_STOP, stopped.outcome)
+    check("and the loss is bounded by the debit",
+          abs(stopped.profit_loss) <= 24.0, str(stopped.profit_loss))
+
+    # The bug this replaces: the long leg alone would have cleared the
+    # target instantly at 1.15 (=$115 against a $36 target).
+    long_leg_only = replay_bars(
+        [Bar(1.15, 0, high=1.15, low=1.15)], debit=24.0, start=start
     )
     check(
-        "a missing short_symbol key is single-leg",
-        can_replay({"long_symbol": "X"})[0] is True,
+        "the long leg alone WOULD have falsely hit target",
+        long_leg_only.outcome == OUTCOME_TARGET,
+        long_leg_only.outcome,
     )
+    check(
+        "but the spread priced properly does not",
+        replay_spread(
+            align_closes([Bar(1.15, 0)], [Bar(0.91, 0)]),
+            debit=24.0, start=start,
+        ).outcome != OUTCOME_TARGET,
+    )
+
+    # A crossed quote on one leg must not read as a loss.
+    crossed = replay_spread(
+        align_closes([Bar(0.80, 0)], [Bar(1.20, 0)]), debit=24.0, start=start
+    )
+    check("a negative spread value is skipped, not stopped on",
+          crossed.outcome != OUTCOME_STOP, crossed.outcome)
+
+    check("a zero debit is rejected",
+          replay_spread(paired, debit=0.0).outcome == OUTCOME_NO_DATA)
+    check("no paired bars means no data",
+          replay_spread([], debit=24.0).outcome == OUTCOME_NO_DATA)
+
+    print()
+    print("Everything is scorable now, by the right method")
+
+    check("a single-leg call is scorable",
+          can_replay({"long_symbol": "EWZ260821C00036500",
+                      "short_symbol": ""})[0] is True)
+    check("a vertical is now scorable too",
+          can_replay({"long_symbol": "ASHR260821C00034500",
+                      "short_symbol": "ASHR260821C00035500"})[0] is True)
 
     print()
     print("Loading")
