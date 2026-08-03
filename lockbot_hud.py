@@ -36,6 +36,7 @@ import argparse
 import html
 import json
 import os
+import re
 import sys
 import time
 import webbrowser
@@ -536,6 +537,51 @@ _TEMPLATE = """<!doctype html>
   .tile .u { color: var(--ink-dim); font-size: 11px; margin-left: 3px; }
 
   .cols { display: grid; grid-template-columns: 1.5fr 1fr; gap: 26px; }
+
+  /* ---- Guard row -------------------------------------------------------
+     The three facts worth interrupting someone for: is the options stop
+     armed, how much of the PDT allowance is left, and does the strategy
+     actually have an edge. Angular cut corners rather than rounded ones —
+     the whole visual language is instrument panel, not web app. */
+  .guard { display: grid; grid-template-columns: repeat(3, 1fr);
+           gap: 14px; margin: 26px 0 22px; }
+  .guard-cell {
+    position: relative; padding: 16px 18px;
+    background: linear-gradient(180deg, rgba(20,38,50,.55), rgba(10,20,28,.35));
+    border: 1px solid rgba(34,229,255,.18);
+    clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+  }
+  .guard-cell::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+    background: var(--ink-faint);
+  }
+  .guard-cell .k { display: block; font-size: 9px; letter-spacing: .3em;
+                   color: var(--ink-faint); margin-bottom: 8px; }
+  .guard-cell .v { display: block; font-size: 20px; letter-spacing: .08em;
+                   color: var(--ink); }
+  .guard-cell .v em { font-style: normal; font-size: 12px;
+                      color: var(--ink-faint); letter-spacing: .1em; }
+
+  .guard-cell.good::before { background: var(--good); box-shadow: 0 0 14px var(--good); }
+  .guard-cell.good .v      { color: var(--good); text-shadow: 0 0 18px rgba(34,229,255,.45); }
+  .guard-cell.warn::before { background: var(--warn); box-shadow: 0 0 14px var(--warn); }
+  .guard-cell.warn .v      { color: var(--warn); }
+  .guard-cell.bad::before  { background: var(--bad); box-shadow: 0 0 18px var(--bad); }
+  .guard-cell.bad .v       { color: var(--bad); text-shadow: 0 0 20px rgba(255,60,90,.5);
+                             animation: alarm 1.1s ease-in-out infinite; }
+  @keyframes alarm { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+
+  .positions { margin-top: 4px; }
+
+  /* Corner brackets on the frame. Pure decoration, but it is the single
+     cheapest thing that makes a page read as an instrument rather than a
+     document. */
+  .frame::before, .frame::after {
+    content: ""; position: fixed; width: 46px; height: 46px;
+    border-color: rgba(34,229,255,.5); pointer-events: none; z-index: 5;
+  }
+  .frame::before { top: 16px; left: 16px; border-top: 2px solid; border-left: 2px solid; }
+  .frame::after { bottom: 16px; right: 16px; border-bottom: 2px solid; border-right: 2px solid; }
   h2 { font-size: 10px; letter-spacing: .26em; color: var(--ink-faint);
        margin-bottom: 11px; font-weight: 500; }
 
@@ -639,38 +685,33 @@ _TEMPLATE = """<!doctype html>
 
   __SPARKLINE__
 
-  <div class="cols">
-    <section>
-      <h2>OPEN POSITIONS</h2>
-      __POSITIONS__
-    </section>
-    <section>
-      <h2>SYSTEM</h2>
-      <div class="panel">__MODULES__</div>
+  <!-- Everything below is something you would ACT on. Universe size,
+       incident counts, buying power, open hypotheses and the profile name
+       were all removed: true, occasionally interesting, and never the
+       reason anyone looks at a HUD mid-session. -->
 
-      <h2>TELEMETRY</h2>
-      <div class="panel">
-        <div class="kv"><span class="k">DAY TRADES</span><span class="v">__TRADES__/__MAX_TRADES__</span></div>
-        <div class="kv"><span class="k">UNIVERSE</span><span class="v">__SCANNED__ scanned</span></div>
-        <div class="kv"><span class="k">OPTIONS</span><span class="v">__OPTIONS_MODE__</span></div>
-        <div class="kv"><span class="k">BUYING POWER</span><span class="v">__BUYING_POWER__</span></div>
-        <div class="kv"><span class="k">INCIDENTS 3D</span><span class="v __INCIDENT_STATUS__">__INCIDENTS__</span></div>
-        <div class="kv"><span class="k">OPEN HYPOTHESES</span><span class="v">__HYPOTHESES__</span></div>
-      </div>
-
-      <h2>EVIDENCE</h2>
-      <div class="panel">
-        <div class="kv"><span class="k">SHADOW WIN RATE</span><span class="v __SHADOW_STATUS__">__SHADOW_WIN__</span></div>
-        <div class="kv"><span class="k">RESOLVED</span><span class="v">__SHADOW_N__</span></div>
-        <div class="kv"><span class="k">BREAKEVEN</span><span class="v">33.3%</span></div>
-      </div>
-    </section>
+  <div class="guard">
+    <div class="guard-cell __OPTIONS_STOP_STATUS__">
+      <span class="k">OPTIONS STOP</span>
+      <span class="v">__OPTIONS_STOP__</span>
+    </div>
+    <div class="guard-cell">
+      <span class="k">DAY TRADES</span>
+      <span class="v">__TRADES__<em>/__MAX_TRADES__</em></span>
+    </div>
+    <div class="guard-cell __SHADOW_STATUS__">
+      <span class="k">EDGE</span>
+      <span class="v">__SHADOW_WIN__<em> vs 33.3%</em></span>
+    </div>
   </div>
 
+  <section class="positions">
+    <h2>OPEN POSITIONS</h2>
+    __POSITIONS__
+  </section>
+
   <footer>
-    <span>PROFILE __PROFILE__</span>
-    <span>MAX __MAX_POS__ POSITIONS</span>
-    <span class="right">REFRESH __INTERVAL__s &nbsp;·&nbsp; F11 FOR FULL SCREEN</span>
+    <span class="right">__SHADOW_N__ RESOLVED &nbsp;·&nbsp; F11 FULL SCREEN</span>
   </footer>
 
 </div>
@@ -1085,7 +1126,49 @@ def render(
     incidents = view.get("incidents") or {}
     learning = view.get("learning") or {}
 
+    # The options stop, promoted out of the module list.
+    #
+    # Alpaca has no broker-side stop for options, so options_manager.py
+    # running every cycle IS the stop loss for every open contract. Buried
+    # as one row among five modules it read like any other service; on a
+    # HUD you glance at, the question "is my downside protected right now"
+    # deserves to be the thing you cannot miss.
+    #
+    # It only earns that prominence when contracts are actually open --
+    # otherwise it is a status about nothing.
+    option_count = sum(
+        1 for position in view["positions"] if position.get("kind") == "option"
+    )
+
+    stop_module = next(
+        (
+            module
+            for module in view["modules"]
+            if "OPTIONS" in module["name"].upper()
+            and "MANAGER" in module["name"].upper()
+        ),
+        None,
+    )
+
+    if not option_count:
+        options_stop_text = "NO CONTRACTS"
+        options_stop_status = "idle"
+    elif stop_module is None:
+        options_stop_text = "UNKNOWN"
+        options_stop_status = "bad"
+    elif stop_module["status"] in ("good", "ok", "healthy"):
+        options_stop_text = f"ARMED · {option_count}"
+        options_stop_status = "good"
+    elif stop_module["status"] in ("warn", "degraded"):
+        options_stop_text = "DEGRADED"
+        options_stop_status = "warn"
+    else:
+        options_stop_text = "NOT RUNNING"
+        options_stop_status = "bad"
+
     replacements = {
+        "__OPTIONS_STOP__": options_stop_text,
+        "__OPTIONS_STOP_STATUS__": options_stop_status,
         "__INTERVAL__": str(interval),
         "__TIME__": view["generated"],
         "__DATE__": view["generated_date"],
@@ -1171,11 +1254,13 @@ def render(
         # placeholder already substituted by the time this runs, so it
         # failed exactly as silently as the previous attempt.
         #
-        # '  <div class="cols">' is literal markup rather than a
-        # placeholder, so nothing rewrites it. The waveform lands directly
-        # above the positions and system columns. The check below turns any
-        # future mismatch into a visible failure.
-        anchor = '  <div class="cols">'
+        # '  <div class="guard">' is literal markup rather than a
+        # placeholder, so nothing rewrites it. The orb lands directly above
+        # the guard row. The check below turns any future mismatch into a
+        # visible failure -- and it earned its keep immediately: trimming
+        # the layout removed the previous anchor and this printed a warning
+        # instead of the display quietly disappearing for a third time.
+        anchor = '  <div class="guard">'
 
         voice_block = (
             '  <canvas class="wave" id="wave" width="400" height="400"></canvas>\n'
@@ -1565,8 +1650,32 @@ def _self_test() -> int:
           "http://" not in markup and "https://" not in markup)
     check("has a refresh directive", "http-equiv=\"refresh\"" in markup)
 
-    # Status must never be colour alone — every dot ships with a word.
-    check("module status carries a text label", "HEALTHY" in markup)
+    # Status must never be colour alone — every indicator ships with a word.
+    #
+    # The per-module list is gone from the layout (the overall chip
+    # aggregates it, and the watchdog alerts independently), so this checks
+    # the indicators that remain rather than the string that used to be
+    # there. Deleting the check would have quietly dropped the principle
+    # along with the markup.
+    # Assert the principle, not a vocabulary. The label is "MARKET CLOSED"
+    # when idle and something else when trading, so listing expected words
+    # would only test which words I happened to think of.
+    chip_text = re.search(
+        r'class="chip[^"]*"[^>]*>(?:<i[^>]*></i>)?([^<]*)<', markup
+    )
+    check(
+        "overall status carries a word, not just a colour",
+        bool(chip_text) and bool(chip_text.group(1).strip()),
+        repr(chip_text.group(1)) if chip_text else "no chip found",
+    )
+
+    armed = render(build_view(state()), live=True)
+    check("the options stop states itself in words", "OPTIONS STOP" in armed)
+    check(
+        "and gives a readable value",
+        any(v in armed for v in ("ARMED", "NOT RUNNING", "DEGRADED",
+                                 "UNKNOWN", "NO CONTRACTS")),
+    )
     check("overall status carries a text label",
           build_view(state())["overall_label"] in markup)
 
