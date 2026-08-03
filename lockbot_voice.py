@@ -157,22 +157,42 @@ STATE_THINKING = "thinking"    # the model is working
 STATE_SPEAKING = "speaking"    # audio is playing
 
 
-def set_voice_state(state: str, detail: str = "") -> None:
-    """Publish the current voice state. Never raises."""
+def set_voice_state(
+    state: str,
+    detail: str = "",
+    words: list | None = None,
+    duration: float = 0.0,
+) -> None:
+    """Publish the current voice state. Never raises.
+
+    `words` carries the speech envelope when state is SPEAKING: one entry
+    per word as [seconds_from_start, seconds_long, character_count]. These
+    come from edge-tts WordBoundary events, so they are the synthesiser's
+    own timings for the audio actually being played -- not an animation
+    guessed from text length.
+
+    The HUD draws its bars from this, which is why they move in time with
+    the voice instead of running at a fixed rate. `duration` is the total
+    speech length so the display knows when to settle.
+    """
 
     import json
 
+    payload = {
+        "state": state,
+        "detail": detail,
+        "at": time.time(),
+    }
+
+    if words:
+        # Trimmed hard: this file is rewritten on every utterance and read
+        # by the HUD several times a second. A long reply could otherwise
+        # publish hundreds of entries for a bar chart 26 pixels tall.
+        payload["words"] = words[:400]
+        payload["duration"] = round(duration, 3)
+
     try:
-        VOICE_STATE_FILE.write_text(
-            json.dumps(
-                {
-                    "state": state,
-                    "detail": detail,
-                    "at": time.time(),
-                }
-            ),
-            encoding="utf-8",
-        )
+        VOICE_STATE_FILE.write_text(json.dumps(payload), encoding="utf-8")
     except Exception:
         pass
 
@@ -544,19 +564,62 @@ def _speak_edge(text: str, voice: str | None = None) -> bool:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as handle:
             audio_file = handle.name
 
+        # Stream rather than save() so the WordBoundary events can be kept.
+        #
+        # save() writes the same bytes and throws the metadata away. edge-tts
+        # emits a WordBoundary for every word with the offset and duration of
+        # that word inside the audio, in 100-nanosecond units. That is the
+        # synthesiser telling us exactly when it will say each word, which is
+        # what lets the HUD draw a waveform that moves with the voice instead
+        # of a canned animation that merely looks busy.
+        #
+        # Audio handling is deliberately unchanged: the same chunks in the
+        # same order to the same file. This path has been the source of three
+        # separate choppiness bugs, so the metadata is collected alongside it
+        # rather than by restructuring it.
+        boundaries: list[list] = []
+
         async def synthesize() -> None:
+            # boundary defaults to "SentenceBoundary", which yields a single
+            # event for a whole reply and would drive a waveform with one
+            # peak in it. Word-level timing has to be asked for explicitly.
             communicate = edge_tts.Communicate(
                 text,
                 voice or EDGE_VOICE,
                 rate=EDGE_RATE,
                 pitch=EDGE_PITCH,
+                boundary="WordBoundary",
             )
-            await communicate.save(audio_file)
+
+            with open(audio_file, "wb") as handle:
+                async for chunk in communicate.stream():
+                    if chunk.get("type") == "audio":
+                        handle.write(chunk["data"])
+
+                    elif chunk.get("type") == "WordBoundary":
+                        # 100ns units -> seconds.
+                        boundaries.append([
+                            round(chunk.get("offset", 0) / 10_000_000, 3),
+                            round(chunk.get("duration", 0) / 10_000_000, 3),
+                            len(str(chunk.get("text", ""))),
+                        ])
 
         asyncio.run(synthesize())
 
         if not os.path.getsize(audio_file):
             return False
+
+        speech_length = 0.0
+
+        if boundaries:
+            speech_length = boundaries[-1][0] + boundaries[-1][1]
+
+        set_voice_state(
+            STATE_SPEAKING,
+            text[:120],
+            words=boundaries,
+            duration=speech_length,
+        )
 
         # Being stopped is an interruption, not a failure, and must not
         # return False — that would trigger the SAPI fallback and start

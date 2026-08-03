@@ -704,20 +704,14 @@ _LIVE_STYLE = """
     50%     { transform: scale(1.12); opacity: 1; }
   }
 
-  /* Speech bars, visible only while talking. */
-  .bars { display: none; gap: 4px; align-items: flex-end; height: 26px;
-          justify-content: center; margin-top: 14px; }
-  body[data-voice="speaking"] .bars { display: flex; }
-  .bars i { width: 3px; background: var(--good); border-radius: 2px;
-            box-shadow: 0 0 8px var(--good); animation: bar .7s ease-in-out infinite; }
-  .bars i:nth-child(1){height:30%;animation-delay:0s}
-  .bars i:nth-child(2){height:70%;animation-delay:.08s}
-  .bars i:nth-child(3){height:45%;animation-delay:.16s}
-  .bars i:nth-child(4){height:90%;animation-delay:.24s}
-  .bars i:nth-child(5){height:55%;animation-delay:.32s}
-  .bars i:nth-child(6){height:75%;animation-delay:.40s}
-  .bars i:nth-child(7){height:35%;animation-delay:.48s}
-  @keyframes bar { 0%,100% { transform: scaleY(.35);} 50% { transform: scaleY(1);} }
+  /* Speech waveform.
+     Drawn on a canvas from the WordBoundary timings lockbot_voice.py
+     publishes, so the peaks land on the words actually being spoken. The
+     CSS bars this replaces ran at a fixed 0.7s cycle whatever was said —
+     it looked alive and told you nothing. */
+  .wave { display: none; margin-top: 12px; width: 100%; height: 44px; }
+  body[data-voice="speaking"] .wave { display: block; }
+  body[data-voice="listening"] .wave { display: block; opacity: .5; }
 
   .voice-line { text-align: center; margin-top: 10px; font-size: 10px;
                 letter-spacing: .22em; color: var(--ink-faint); min-height: 14px; }
@@ -741,6 +735,113 @@ const LABELS = {
 
 let lastEquity = null;
 
+// ---------------------------------------------------------------------------
+// Speech waveform
+//
+// lockbot_voice.py publishes edge-tts WordBoundary events: for every word,
+// when it starts and how long it lasts, in seconds from the beginning of the
+// utterance. Those are the synthesiser's own timings for the audio actually
+// playing, so a peak here is a word being said rather than a decorative
+// pulse. `at` is when playback began, which is what anchors the playhead.
+//
+// The canvas runs on requestAnimationFrame rather than the one-second poll —
+// speech moves far faster than the numbers do, and driving it off the poll
+// would produce a bar chart that lurched once a second.
+// ---------------------------------------------------------------------------
+let speech = { words: [], duration: 0, startedAt: 0, active: false };
+
+function updateSpeech(v) {
+  const speaking = v && v.state === "speaking";
+
+  if (speaking && Array.isArray(v.words) && v.words.length) {
+    // Only re-anchor on a genuinely new utterance, otherwise every poll
+    // would restart the playhead and the wave would never advance.
+    if (v.at !== speech.startedAt) {
+      speech = {
+        words: v.words,
+        duration: v.duration || 0,
+        startedAt: v.at,
+        active: true,
+        localStart: performance.now() / 1000
+      };
+    }
+  } else if (!speaking) {
+    speech.active = false;
+  }
+}
+
+// Amplitude at a moment: how loudly, roughly, is it speaking right now.
+// A word contributes a smooth hump across its own duration, scaled a little
+// by length so "unaffected" reads bigger than "is". Silence between words
+// falls to zero, which is what makes it look like speech rather than a
+// oscillator.
+function amplitudeAt(t) {
+  let total = 0;
+
+  for (let i = 0; i < speech.words.length; i++) {
+    const [start, dur, chars] = speech.words[i];
+
+    if (t < start - 0.05 || t > start + dur + 0.05) continue;
+
+    const span = Math.max(dur, 0.06);
+    const phase = (t - start) / span;
+    if (phase < -0.2 || phase > 1.2) continue;
+
+    const hump = Math.sin(Math.max(0, Math.min(1, phase)) * Math.PI);
+    total += hump * (0.55 + Math.min(chars, 12) / 24);
+  }
+
+  return Math.min(1, total);
+}
+
+function drawWave() {
+  const canvas = document.getElementById("wave");
+
+  if (canvas) {
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width;
+    const h = canvas.height;
+    const mid = h / 2;
+    ctx.clearRect(0, 0, w, h);
+
+    const now = performance.now() / 1000;
+    const elapsed = speech.active ? now - speech.localStart : 0;
+    const live = speech.active && elapsed <= speech.duration + 0.4;
+
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = live ? "#22e5ff" : "rgba(120,150,170,.35)";
+    ctx.shadowBlur = live ? 12 : 0;
+    ctx.shadowColor = "#22e5ff";
+    ctx.beginPath();
+
+    // A window of the utterance around the playhead, so the wave scrolls
+    // past rather than redrawing the whole reply every frame.
+    const WINDOW = 1.6;
+
+    for (let x = 0; x <= w; x++) {
+      const t = elapsed - WINDOW / 2 + (x / w) * WINDOW;
+      let amp = live && t >= 0 ? amplitudeAt(t) : 0;
+
+      // Idle breathing so the line is never dead flat.
+      if (!live) amp = 0.05 + 0.03 * Math.sin(now * 2 + x / 40);
+
+      // Carrier gives it the fine structure of a waveform; the envelope
+      // above decides how tall it gets.
+      const carrier = Math.sin((x / w) * 46 + now * 26);
+      const y = mid - amp * carrier * (h * 0.42);
+
+      if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  requestAnimationFrame(drawWave);
+}
+
+requestAnimationFrame(drawWave);
+
 async function tick() {
   try {
     const res = await fetch("/state", { cache: "no-store" });
@@ -748,6 +849,7 @@ async function tick() {
 
     const voice = (s.voice && s.voice.state) || "idle";
     document.body.dataset.voice = voice;
+    updateSpeech(s.voice);
 
     const line = document.getElementById("voiceLine");
     line.textContent = LABELS[voice] || "";
@@ -1019,9 +1121,7 @@ def render(
         # the fragile version of this had unbalanced quotes and invented
         # closing tags.
         voice_block = (
-            '  <div class="bars">'
-            "<i></i><i></i><i></i><i></i><i></i><i></i><i></i>"
-            "</div>\n"
+            '  <canvas class="wave" id="wave" width="640" height="88"></canvas>\n'
             '  <div class="voice-line" id="voiceLine"></div>\n'
             '  <div class="heard" id="heard"></div>\n\n'
             '  <div class="tiles">'
