@@ -40,7 +40,7 @@ import re
 import sys
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_FOLDER = Path(__file__).resolve().parent
@@ -106,6 +106,72 @@ def fetch_equity_history(points: int = 40) -> list[float]:
 
     except Exception:
         return []
+
+
+def fetch_market_clock() -> dict:
+    """When the session next opens or closes, as epoch seconds.
+
+    The countdown runs in the browser off this timestamp rather than being
+    re-rendered as text each second — a clock redrawn once per poll ticks
+    in visible one-second jumps, which reads as a stalled display.
+
+    Returns {} when the broker is unreachable, and the header simply
+    omits the countdown rather than guessing at market hours locally.
+    Hard-coding 09:30–16:00 would be wrong on every early close.
+    """
+
+    try:
+        from rearm_brackets import _client
+
+        clock = _client().get_clock()
+
+        target = clock.next_close if clock.is_open else clock.next_open
+
+        return {
+            "is_open": bool(clock.is_open),
+            "target_epoch": target.timestamp(),
+            "label": "CLOSES IN" if clock.is_open else "OPENS IN",
+        }
+
+    except Exception:
+        return {}
+
+
+def fetch_last_cycle() -> float | None:
+    """Epoch seconds of the freshest module heartbeat.
+
+    The controller writes nothing itself between cycles, but every
+    component stamps the heartbeat file when it runs. The newest stamp is
+    therefore when work last happened, which is what the pulse indicates.
+    """
+
+    try:
+        from system_heartbeat import load_heartbeat_state
+
+        modules = (load_heartbeat_state() or {}).get("modules", {}) or {}
+
+        stamps = []
+
+        for entry in modules.values():
+            raw = entry.get("last_heartbeat_at_utc")
+
+            if not raw:
+                continue
+
+            try:
+                moment = datetime.fromisoformat(raw)
+            except ValueError:
+                continue
+
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+
+            stamps.append(moment.timestamp())
+
+        return max(stamps) if stamps else None
+
+    except Exception:
+        return None
 
 
 def fetch_live_positions() -> dict[str, dict]:
@@ -706,6 +772,27 @@ _TEMPLATE = """<!doctype html>
   .hero-spark { margin-top: 16px; opacity: .8; }
   .hero-spark svg { display: block; }
 
+  /* ---- Session countdown + cycle pulse ----
+     Both live in the header because both answer "is this thing supposed
+     to be doing anything right now, and is it". */
+  .session, .cycle { margin-left: 26px; text-align: right; line-height: 1.5; }
+  .session .k, .cycle span { display: block; font-size: 9px;
+                             letter-spacing: .28em; color: var(--ink-faint); }
+  .session .v { display: block; font-size: 17px; letter-spacing: .1em;
+                color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .cycle { display: flex; align-items: center; gap: 8px; text-align: left; }
+  .cycle-dot { width: 8px; height: 8px; border-radius: 50%;
+               background: var(--ink-faint); flex: none; }
+  /* Fresh work pulses. Stale goes amber, dead goes red and stops moving —
+     a still dot is the correct signal for a system that has stopped. */
+  .cycle-dot.live  { background: var(--good); box-shadow: 0 0 10px var(--good);
+                     animation: cycle-beat 2s ease-in-out infinite; }
+  .cycle-dot.stale { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .cycle-dot.dead  { background: var(--bad);  box-shadow: 0 0 12px var(--bad); }
+  @keyframes cycle-beat { 0%,100% { opacity: 1; transform: scale(1); }
+                          50% { opacity: .35; transform: scale(.7); } }
+
   footer { margin-top: 22px; padding-top: 13px; border-top: 1px solid var(--line);
            display: flex; gap: 22px; color: var(--ink-faint); font-size: 10px;
            letter-spacing: .14em; }
@@ -725,6 +812,14 @@ _TEMPLATE = """<!doctype html>
   <header>
     <div class="wordmark">LOCK<span>BOT</span></div>
     <div class="tagline">AUTONOMOUS TRADING SYSTEM</div>
+    <div class="session">
+      <span class="k" id="sessionLabel"></span>
+      <span class="v" id="sessionCountdown">—</span>
+    </div>
+    <div class="cycle" title="time since any component last ran">
+      <i class="cycle-dot" id="cycleDot"></i>
+      <span id="cycleAge">—</span>
+    </div>
     <div class="clock"><b>__TIME__</b>__DATE__</div>
   </header>
 
@@ -840,6 +935,83 @@ const LABELS = {
 };
 
 let lastEquity = null;
+
+// ---------------------------------------------------------------------------
+// Session countdown and cycle pulse
+//
+// Both tick locally once a second off timestamps the server sends, rather
+// than being redrawn on the one-second poll. A countdown re-rendered by the
+// poll drifts and stutters; one driven by a fixed target epoch stays smooth
+// even if a request is slow or dropped.
+// ---------------------------------------------------------------------------
+let session = null;   // { target_epoch, label, is_open }
+let lastCycle = null; // epoch seconds of the freshest heartbeat
+
+function countdownText(seconds) {
+  if (seconds <= 0) return "NOW";
+
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+
+  // Hours matter overnight; seconds only matter near the bell.
+  if (h > 0) return h + "h " + String(m).padStart(2, "0") + "m";
+  if (m > 0) return m + "m " + String(s).padStart(2, "0") + "s";
+  return s + "s";
+}
+
+function tickLocal() {
+  const now = Date.now() / 1000;
+
+  const label = document.getElementById("sessionLabel");
+  const value = document.getElementById("sessionCountdown");
+
+  if (label && value) {
+    if (session && session.target_epoch) {
+      label.textContent = session.label;
+      value.textContent = countdownText(session.target_epoch - now);
+    } else {
+      label.textContent = "SESSION";
+      value.textContent = "—";
+    }
+  }
+
+  const dot = document.getElementById("cycleDot");
+  const age = document.getElementById("cycleAge");
+
+  if (dot && age) {
+    if (lastCycle) {
+      const since = now - lastCycle;
+
+      // The controller skips its component run while the market is shut,
+      // so silence overnight is expected and must not read as a fault.
+      // Only judge staleness when the session is actually open.
+      let cls = "live";
+
+      if (session && session.is_open === false) {
+        cls = "";
+        age.textContent = "IDLE · MARKET SHUT";
+      } else if (since > 900) {
+        cls = "dead";
+        age.textContent = "NO CYCLE " + Math.floor(since / 60) + "m";
+      } else if (since > 420) {
+        cls = "stale";
+        age.textContent = "LAST CYCLE " + Math.floor(since / 60) + "m";
+      } else {
+        age.textContent = "CYCLE " + Math.floor(since) + "s AGO";
+      }
+
+      dot.className = "cycle-dot " + cls;
+    } else {
+      dot.className = "cycle-dot";
+      age.textContent = "NO HEARTBEAT";
+    }
+  }
+
+  setTimeout(tickLocal, 1000);
+}
+
+tickLocal();
 
 // ---------------------------------------------------------------------------
 // Speech waveform
@@ -995,6 +1167,12 @@ async function tick() {
     const voice = (s.voice && s.voice.state) || "idle";
     document.body.dataset.voice = voice;
     updateSpeech(s.voice);
+
+    // Timestamps for the local tickers. Absent when the broker was
+    // unreachable, in which case the header shows a dash rather than a
+    // stale countdown that keeps confidently counting.
+    session = s.clock && s.clock.target_epoch ? s.clock : null;
+    lastCycle = s.last_cycle || null;
 
     const line = document.getElementById("voiceLine");
     line.textContent = LABELS[voice] || "";
@@ -1493,6 +1671,8 @@ def build_full_view(interval: int) -> dict:
 
     view["positions"] = positions
     view["equity_history"] = fetch_equity_history()
+    view["clock"] = fetch_market_clock()
+    view["last_cycle"] = fetch_last_cycle()
 
     try:
         from lockbot_incidents import collect as collect_incidents
@@ -1861,6 +2041,25 @@ def _self_test() -> int:
 
     check("the equity curve sits in the header",
           'class="hero-spark"' in losing)
+
+    print()
+    print("Session countdown and cycle pulse")
+
+    check("the countdown has a slot", 'id="sessionCountdown"' in losing)
+    check("and a label", 'id="sessionLabel"' in losing)
+    check("the cycle dot is rendered", 'id="cycleDot"' in losing)
+    check("with an age readout", 'id="cycleAge"' in losing)
+    check("both tick locally, not on the poll", "tickLocal" in losing)
+    check("countdown formatting is included", "countdownText" in losing)
+
+    # Silence overnight is correct behaviour, not a fault: the controller
+    # skips its component run while the market is shut. The pulse must say
+    # so rather than escalating to red every night.
+    check(
+        "a shut market reads as idle, not as a failure",
+        "IDLE · MARKET SHUT" in losing,
+    )
+    check("a real stall still reads as NO CYCLE", "NO CYCLE" in losing)
 
     print()
 
