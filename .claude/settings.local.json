@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \".\\\\.venv\\\\Scripts\\\\python.exe\" -c \"import trade_manager; trade_manager.run_trade_manager\\(\\)\")",
+      "PowerShell(& \".\\\\.venv\\\\Scripts\\\\python.exe\" options_contracts.py --self-test)",
+      "PowerShell(& \".\\\\.venv\\\\Scripts\\\\python.exe\" shadow_trades.py 2>&1)",
+      "PowerShell(& \".\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\jtmed\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--LockBot-Medlockbot\\\\665e9d86-b88f-4977-8291-3230a29fd3d5\\\\scratchpad\\\\option_orders.py\")",
+      "PowerShell(& \".\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\jtmed\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--LockBot-Medlockbot\\\\665e9d86-b88f-4977-8291-3230a29fd3d5\\\\scratchpad\\\\test_notify_filter.py\")",
+      "PowerShell(Select-String -Path lockbot_process.py -Pattern \"def start_controller\" -Context 0,40 | ForEach-Object { $_.Line; $_.Context.PostContext })"
+    ]
+  }
+}

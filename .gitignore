@@ -1,0 +1,84 @@
+# ---------------------------------------------------------------------------
+# CREDENTIALS — never commit these
+#
+# .env holds the Alpaca API keys, the Anthropic key, the Pushover tokens
+# and the Telegram bot token. Anything matching .env* stays out, including
+# the dated backups, because a leaked backup leaks exactly as much as a
+# leaked original. .env.example below is the safe, empty template.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# ---------------------------------------------------------------------------
+# LIVE STATE — machine-specific, changes every cycle
+#
+# These describe what LOCKBOT is doing right now on THIS machine. Tracking
+# them would mean a merge conflict on every cycle and, worse, restoring an
+# old commit would restore a stale idea of which positions are open. The
+# broker is the source of truth for state, not the repository.
+# ---------------------------------------------------------------------------
+position_state.json
+options_position_state.json
+risk_state.json
+options_risk_state.json
+notification_state.json
+notifications_state.json
+lockbot_heartbeat.json
+self_repair_state.json
+self_repair_test.json
+scanner_state.json
+hud_voice_state.json
+performance_metrics.json
+
+# Old copies of live state. Superseded by git history and never useful to
+# restore — the broker decides what is actually open.
+*_OLD.json
+
+# ---------------------------------------------------------------------------
+# DATA AND LOGS
+#
+# Trading history and logs are records, not source. signals.csv alone is
+# 7 MB and grows every scan; committing it would bloat the repository
+# without making anything reproducible. Keep them on disk, out of git.
+# ---------------------------------------------------------------------------
+*.log
+*.csv
+*.jsonl
+*.zip
+lockbot_log.txt
+paper_order_log.txt
+!requirements*.txt
+
+# ---------------------------------------------------------------------------
+# BACKUPS
+#
+# The 26 hand-made backup copies this repository replaces. They are
+# committed once in the initial commit so nothing is lost, then removed
+# from the working tree — git is the history from here on.
+# ---------------------------------------------------------------------------
+*.bak
+*.bak_*
+*.bak2_*
+*.bak3_*
+*.corrupt_*
+
+# ---------------------------------------------------------------------------
+# PYTHON
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---------------------------------------------------------------------------
+# EDITOR AND OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

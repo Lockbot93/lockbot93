@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="30">
+<title>LOCKBOT</title>
+<style>
+  /* Dark by deliberate choice — this is a screensaver, not a document.
+     There is no light mode because the design commits to one look. */
+  :root {
+    --surface:   #05070d;
+    --panel:     #0b1018;
+    --line:      #16202e;
+
+    /* Ink. Text always wears these, never a status hue — a coloured
+       dot beside a label carries the state, the label stays readable. */
+    --ink:       #e6f4f8;
+    --ink-dim:   #8fa6b4;
+    --ink-faint: #4a5c68;
+
+    /* Reserved status palette. Four states, never reused as decoration. */
+    --good: #22d3ee;
+    --warn: #fbbf24;
+    --crit: #f87171;
+    --idle: #64748b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
+
+  body {
+    background:
+      radial-gradient(ellipse 120% 80% at 50% 0%, #0d1826 0%, transparent 60%),
+      radial-gradient(ellipse 100% 60% at 50% 100%, #0a1420 0%, transparent 60%),
+      var(--surface);
+    color: var(--ink);
+    font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    letter-spacing: 0.04em;
+  }
+
+  /* Faint scan grid. Low contrast on purpose — it should read as
+     texture, never compete with a number. */
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(rgba(34,211,238,.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(34,211,238,.045) 1px, transparent 1px);
+    background-size: 44px 44px;
+    pointer-events: none;
+  }
+
+  body::after {
+    content: "";
+    position: fixed; left: 0; right: 0; height: 140px;
+    background: linear-gradient(180deg, transparent, rgba(34,211,238,.05), transparent);
+    animation: sweep 9s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes sweep { from { top: -140px; } to { top: 100%; } }
+
+  .frame {
+    position: relative;
+    width: min(1500px, 94vw);
+    max-height: 94vh;
+    padding: 30px 38px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: linear-gradient(180deg, rgba(11,16,24,.92), rgba(5,7,13,.92));
+    box-shadow: 0 0 90px rgba(34,211,238,.06), inset 0 0 90px rgba(0,0,0,.5);
+  }
+
+  /* Corner ticks — cheap HUD framing, pure decoration. */
+  .frame::before, .frame::after {
+    content: ""; position: absolute; width: 22px; height: 22px;
+    border-color: var(--good); border-style: solid; opacity: .5;
+  }
+  .frame::before { top: -1px; left: -1px; border-width: 2px 0 0 2px; }
+  .frame::after  { bottom: -1px; right: -1px; border-width: 0 2px 2px 0; }
+
+  header {
+    display: flex; align-items: baseline; gap: 18px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 14px; margin-bottom: 22px;
+  }
+  .wordmark { font-size: 20px; font-weight: 700; letter-spacing: .34em; }
+  .wordmark span { color: var(--good); }
+  .tagline { color: var(--ink-faint); font-size: 11px; letter-spacing: .2em; }
+  .clock { margin-left: auto; text-align: right; color: var(--ink-dim); font-size: 12px; }
+  .clock b { display:block; color: var(--ink); font-size: 22px; font-weight: 600; }
+
+  /* Status chip: dot + WORD. Never colour alone. */
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 12px; border-radius: 3px; font-size: 11px;
+    letter-spacing: .18em; border: 1px solid currentColor;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor;
+         box-shadow: 0 0 9px currentColor; animation: pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .good { color: var(--good); }
+  .warn { color: var(--warn); }
+  .crit { color: var(--crit); }
+  .idle { color: var(--idle); }
+
+  .top { display: grid; grid-template-columns: 1.15fr 1fr; gap: 34px; align-items: center; }
+
+  .hero-label { color: var(--ink-faint); font-size: 11px; letter-spacing: .26em; margin-bottom: 6px; }
+  .hero { font-size: clamp(52px, 7.4vw, 96px); font-weight: 300; line-height: 1;
+          text-shadow: 0 0 40px rgba(34,211,238,.28); }
+  .hero-sub { margin-top: 12px; display: flex; gap: 26px; align-items: baseline; }
+  .delta { font-size: 26px; font-weight: 500; }
+  .delta-pct { font-size: 15px; color: var(--ink-dim); }
+
+  /* Reactor rings. Decoration, and the only animation that implies
+     "running" without claiming a number. */
+  .reactor { position: relative; width: 190px; height: 190px; margin: 0 auto; }
+  .ring { position: absolute; inset: 0; border-radius: 50%; border: 1px solid transparent; }
+  .r1 { border-top-color: var(--good); border-right-color: var(--good);
+        opacity:.75; animation: spin 7s linear infinite; }
+  .r2 { inset: 22px; border-bottom-color: var(--good); border-left-color: var(--good);
+        opacity:.45; animation: spin 11s linear infinite reverse; }
+  .r3 { inset: 44px; border-top-color: var(--good); opacity:.3;
+        animation: spin 5s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .core { position: absolute; inset: 66px; border-radius: 50%;
+          background: radial-gradient(circle, rgba(34,211,238,.34), transparent 70%);
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          text-align: center; }
+  .core b { font-size: 27px; font-weight: 600; }
+  .core small { font-size: 9px; color: var(--ink-dim); letter-spacing: .16em; }
+
+  .tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 26px 0; }
+  .tile { border: 1px solid var(--line); border-radius: 3px; padding: 13px 15px;
+          background: rgba(255,255,255,.012); }
+  .tile .k { color: var(--ink-faint); font-size: 10px; letter-spacing: .18em; margin-bottom: 7px; }
+  .tile .v { font-size: 21px; font-weight: 600; }
+  .tile .u { color: var(--ink-dim); font-size: 11px; margin-left: 3px; }
+
+  .cols { display: grid; grid-template-columns: 1.5fr 1fr; gap: 26px; }
+  h2 { font-size: 10px; letter-spacing: .26em; color: var(--ink-faint);
+       margin-bottom: 11px; font-weight: 500; }
+
+  .pos { display: flex; align-items: center; gap: 14px; padding: 11px 13px;
+         border: 1px solid var(--line); border-left: 2px solid var(--good);
+         border-radius: 3px; margin-bottom: 8px; background: rgba(255,255,255,.012); }
+  .pos.untracked { border-left-color: var(--warn); }
+  .pos.unguarded { border-left-color: var(--crit); background: rgba(248,113,113,.07); }
+  .pos.unguarded .right { color: var(--crit); }
+  .pos .sym { font-weight: 700; font-size: 15px; min-width: 108px; }
+  .pos .meta { color: var(--ink-dim); font-size: 11px; }
+  .pos .right { margin-left: auto; text-align: right; font-size: 11px; }
+
+  .mod { display: flex; align-items: center; gap: 10px; padding: 7px 0;
+         border-bottom: 1px solid rgba(22,32,46,.55); font-size: 11px; }
+  .mod .nm { color: var(--ink-dim); }
+  .mod .st { margin-left: auto; letter-spacing: .14em; font-size: 10px; }
+
+  .empty { color: var(--ink-faint); font-size: 12px; padding: 13px 0; }
+
+  footer { margin-top: 22px; padding-top: 13px; border-top: 1px solid var(--line);
+           display: flex; gap: 22px; color: var(--ink-faint); font-size: 10px;
+           letter-spacing: .14em; }
+  footer .right { margin-left: auto; }
+
+  @media (max-width: 1080px) {
+    .top { grid-template-columns: 1fr; }
+    .reactor { display: none; }
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    .cols { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+
+  <header>
+    <div class="wordmark">LOCK<span>BOT</span></div>
+    <div class="tagline">AUTONOMOUS TRADING SYSTEM</div>
+    <div class="clock"><b>00:03:04</b>Thu 30 Jul 2026</div>
+  </header>
+
+  <div class="top">
+    <div>
+      <div class="hero-label">ACCOUNT EQUITY</div>
+      <div class="hero">$249.47</div>
+      <div class="hero-sub">
+        <span class="delta warn">-$1.36</span>
+        <span class="delta-pct">-0.54% today</span>
+        <span class="chip crit"><i class="dot"></i>2 POSITION(S) UNPROTECTED</span>
+      </div>
+    </div>
+    <div class="reactor">
+      <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+      <div class="core crit">
+        <b>2</b><small>OPEN</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="tiles">
+    <div class="tile"><div class="k">BUYING POWER</div><div class="v">$148.95</div></div>
+    <div class="tile"><div class="k">TRADES TODAY</div><div class="v">2<span class="u">/10</span></div></div>
+    <div class="tile"><div class="k">SYMBOLS SCANNED</div><div class="v">47</div></div>
+    <div class="tile"><div class="k">OPTIONS</div><div class="v">LIVE</div></div>
+    <div class="tile"><div class="k">SHADOW WIN RATE</div><div class="v warn">27.3%<span class="u">n=55</span></div></div>
+  </div>
+
+  <div class="cols">
+    <section>
+      <h2>OPEN POSITIONS</h2>
+      <div class="pos unguarded"><span class="sym">NVO</span><span class="meta">entry $51.36</span><span class="right">peak +1.19%<br><span class="meta">NO STOP LOSS</span></span></div><div class="pos unguarded"><span class="sym">LVS</span><span class="meta">entry $48.49</span><span class="right">peak +1.51%<br><span class="meta">NO STOP LOSS</span></span></div>
+    </section>
+    <section>
+      <h2>MODULES</h2>
+      <div class="mod good"><i class="dot"></i><span class="nm">MARKET SCANNER</span><span class="st">HEALTHY</span></div><div class="mod good"><i class="dot"></i><span class="nm">OPTIONS MANAGER</span><span class="st">HEALTHY</span></div><div class="mod good"><i class="dot"></i><span class="nm">OPTIONS SCANNER</span><span class="st">HEALTHY</span></div><div class="mod good"><i class="dot"></i><span class="nm">POSITION MONITOR</span><span class="st">HEALTHY</span></div><div class="mod good"><i class="dot"></i><span class="nm">TRADE MANAGER</span><span class="st">HEALTHY</span></div>
+    </section>
+  </div>
+
+  <footer>
+    <span>PROFILE SMALL</span>
+    <span>MAX 2 POSITIONS</span>
+    <span class="right">REFRESH 30s &nbsp;·&nbsp; F11 FOR FULL SCREEN</span>
+  </footer>
+
+</div>
+</body>
+</html>
