@@ -571,7 +571,52 @@ _TEMPLATE = """<!doctype html>
                              animation: alarm 1.1s ease-in-out infinite; }
   @keyframes alarm { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
 
+  /* ---- PDT pips ---- */
+  .pips { display: flex; gap: 6px; margin-top: 12px; }
+  .pips .pip { width: 100%; height: 4px; background: rgba(120,150,170,.22);
+               clip-path: polygon(0 0, 100% 0, calc(100% - 3px) 100%, 0 100%); }
+  .pips .pip.on { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
+
+  /* ---- Edge gauge ----
+     Breakeven is a tick on the scale, not a sentence beneath it. Sitting
+     left of that tick is the entire strategic problem, visible without
+     reading a number. */
+  .gauge { position: relative; height: 6px; margin-top: 12px;
+           background: rgba(120,150,170,.16); overflow: visible; }
+  .gauge-fill { position: absolute; left: 0; top: 0; bottom: 0;
+                transition: width .6s ease; }
+  .gauge-fill.good { background: var(--good); box-shadow: 0 0 12px var(--good); }
+  .gauge-fill.bad  { background: var(--bad);  box-shadow: 0 0 12px var(--bad); }
+  .gauge-mark { position: absolute; top: -4px; bottom: -4px; width: 2px;
+                background: var(--ink); opacity: .85; }
+  .gauge-mark::after { content: ""; position: absolute; top: -4px; left: -2px;
+                       border-left: 3px solid transparent;
+                       border-right: 3px solid transparent;
+                       border-top: 4px solid var(--ink); }
+  .gauge-empty { font-size: 10px; letter-spacing: .25em; color: var(--ink-faint); }
+
   .positions { margin-top: 4px; }
+
+  /* ---- Radar sweep behind the orb ----
+     Ties the speech display to the instrument language of the rest of the
+     panel. Purely decorative — it carries no data and is not pretending to. */
+  .orb-wrap { position: relative; width: 200px; height: 200px; margin: 14px auto 0; }
+  .orb-wrap::before {
+    content: ""; position: absolute; inset: 8px; border-radius: 50%;
+    border: 1px dashed rgba(34,229,255,.12);
+  }
+  .orb-wrap::after {
+    content: ""; position: absolute; inset: 8px; border-radius: 50%;
+    background: conic-gradient(from 0deg, rgba(34,229,255,.16), transparent 70deg);
+    animation: sweep-radar 4.5s linear infinite;
+  }
+  @keyframes sweep-radar { to { transform: rotate(360deg); } }
+  .orb-wrap .wave { position: relative; z-index: 2; margin: 0; }
+
+  /* Reticle ticks around the orb, every 30 degrees. */
+  .orb-wrap .tick { position: absolute; left: 50%; top: 50%; width: 1px;
+                    height: 50%; transform-origin: top center;
+                    background: linear-gradient(180deg, rgba(34,229,255,.30) 0 6px, transparent 6px); }
 
   /* Corner brackets on the frame. Pure decoration, but it is the single
      cheapest thing that makes a page read as an instrument rather than a
@@ -696,12 +741,14 @@ _TEMPLATE = """<!doctype html>
       <span class="v">__OPTIONS_STOP__</span>
     </div>
     <div class="guard-cell">
-      <span class="k">DAY TRADES</span>
+      <span class="k">DAY TRADES · PDT</span>
       <span class="v">__TRADES__<em>/__MAX_TRADES__</em></span>
+      <div class="pips">__PDT_PIPS__</div>
     </div>
     <div class="guard-cell __SHADOW_STATUS__">
-      <span class="k">EDGE</span>
-      <span class="v">__SHADOW_WIN__<em> vs 33.3%</em></span>
+      <span class="k">EDGE vs BREAKEVEN</span>
+      <span class="v">__SHADOW_WIN__<em> / 33.3%</em></span>
+      __EDGE_BAR__
     </div>
   </div>
 
@@ -1166,7 +1213,40 @@ def render(
         options_stop_text = "NOT RUNNING"
         options_stop_status = "bad"
 
+    # ---- PDT pips -------------------------------------------------------
+    # Three round trips per five business days under $25k. A fraction like
+    # "1/3" is read; three pips are SEEN. The limit is small enough that
+    # one glyph per trade is honest rather than a bar chart of nothing.
+    used = min(int(view["trades_today"]), int(view["max_trades"]))
+    pip_html = "".join(
+        f'<i class="pip{" on" if n < used else ""}"></i>'
+        for n in range(int(view["max_trades"]))
+    )
+
+    # ---- Edge gauge -----------------------------------------------------
+    # Win rate against the 33.3% breakeven, with breakeven drawn as a tick
+    # rather than written underneath. The scale tops out at 60% because
+    # nothing above that is plausible here and a 0-100 axis would squash
+    # the only region that matters into the left third.
+    SCALE = 60.0
+    win_rate = view.get("shadow_win_rate")
+
+    if win_rate is None:
+        edge_html = '<div class="gauge"><div class="gauge-empty">NO DATA</div></div>'
+    else:
+        fill = max(0.0, min(float(win_rate), SCALE)) / SCALE * 100
+        mark = 33.3 / SCALE * 100
+        tone = "good" if float(win_rate) >= 33.3 else "bad"
+        edge_html = (
+            f'<div class="gauge">'
+            f'<div class="gauge-fill {tone}" style="width:{fill:.1f}%"></div>'
+            f'<div class="gauge-mark" style="left:{mark:.1f}%"></div>'
+            f"</div>"
+        )
+
     replacements = {
+        "__PDT_PIPS__": pip_html,
+        "__EDGE_BAR__": edge_html,
         "__OPTIONS_STOP__": options_stop_text,
         "__OPTIONS_STOP_STATUS__": options_stop_status,
         "__INTERVAL__": str(interval),
@@ -1263,7 +1343,14 @@ def render(
         anchor = '  <div class="guard">'
 
         voice_block = (
-            '  <canvas class="wave" id="wave" width="400" height="400"></canvas>\n'
+            '  <div class="orb-wrap">'
+            + "".join(
+                f'<i class="tick" style="transform:translate(-50%,0) '
+                f'rotate({angle}deg)"></i>'
+                for angle in range(0, 360, 30)
+            )
+            + '<canvas class="wave" id="wave" width="400" height="400">'
+            "</canvas></div>\n"
             '  <div class="voice-line" id="voiceLine"></div>\n'
             '  <div class="heard" id="heard"></div>\n\n'
             + anchor
@@ -1668,6 +1755,44 @@ def _self_test() -> int:
         bool(chip_text) and bool(chip_text.group(1).strip()),
         repr(chip_text.group(1)) if chip_text else "no chip found",
     )
+
+    print()
+    print("Widgets carry real values, not decoration")
+
+    # PDT pips: one per allowed round trip, lit for each one used.
+    pips = render(build_view(state(risk_state={
+        "trades_submitted_today": 2, "kill_switch_active": False,
+    })), live=True)
+    check("pips are rendered", 'class="pip' in pips)
+    check("two of three are lit", pips.count('class="pip on"') == 2,
+          str(pips.count('class="pip on"')))
+
+    none_used = render(build_view(state(risk_state={
+        "trades_submitted_today": 0, "kill_switch_active": False,
+    })), live=True)
+    check("none lit at zero trades", none_used.count('class="pip on"') == 0)
+
+    # Edge gauge: fill scaled to a 60% axis, breakeven drawn as a tick.
+    losing = render(build_view(state(shadow_summary={
+        "resolved": 94, "win_rate_percent": 20.2,
+    })), live=True)
+    check("the gauge renders", 'class="gauge"' in losing)
+    check("a losing edge is red", 'gauge-fill bad' in losing)
+    check("breakeven is marked on the scale", 'gauge-mark' in losing)
+
+    winning = render(build_view(state(shadow_summary={
+        "resolved": 94, "win_rate_percent": 45.0,
+    })), live=True)
+    check("a winning edge is green", 'gauge-fill good' in winning)
+
+    blank = render(build_view(state(shadow_summary={})), live=True)
+    check("no data says so rather than drawing an empty bar",
+          "NO DATA" in blank)
+
+    check("the orb has its reticle", 'class="tick"' in losing)
+    check("and its radar wrapper", 'class="orb-wrap"' in losing)
+
+    print()
 
     armed = render(build_view(state()), live=True)
     check("the options stop states itself in words", "OPTIONS STOP" in armed)
