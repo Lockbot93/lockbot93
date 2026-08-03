@@ -182,6 +182,35 @@ logged per setup as `q_*` columns; `signal_research.py` will report whether
 those components carry information once enough resolve. Do not fit a new
 score before that evidence exists.
 
+## Options rules added 2026-08-03
+
+Each was written after the behaviour it prevents actually happened.
+
+- **A stop must survive two consecutive cycles** (`OPTIONS_STOP_CONFIRM_CYCLES`).
+  An EWZ call exited at −8.1% against a −35% stop: the sell went out as a
+  limit at the stop and filled 42% above it, and no trade in that window
+  printed near the level. These books are fresh but wide and jittery —
+  16–28% spreads with the bid moving 8% between polls seconds apart — so
+  one bid print is not evidence. Take-profit and the time rules still fire
+  immediately; only the destructive rule waits.
+- **One position per underlying.** The same IBIT 36/36.5 spread was
+  submitted three times across three cycles, because an entry whose order
+  is still working does not look like a position yet. A signal that
+  persists is a reason to keep holding, not to buy again every five
+  minutes. The scanner claims the name on submission so a second candidate
+  in the same cycle cannot slip through either.
+- **Fills are verified by order id, not by symbol.** Both IBIT entries
+  shared a `long_symbol`, so the one that filled satisfied the check for
+  both. `entry_filled` is sticky, so a reconciliation pass compares tracked
+  entries against broker *quantity* and resolves any excess by order.
+- **There is no minimum quality gate**, and setting one is still a guess.
+  The spread, delta and affordability checks ask whether a setup is
+  tradable, never whether it is good. Every ranked candidate is now logged
+  with `action=CANDIDATE` so the distribution accumulates — 61 arrived in
+  a single afternoon, so this is answerable in weeks, not months. First
+  reading: median 28.8, max 63.8, and a floor of 50 would reject 98%.
+  Do not set `OPTIONS_MIN_QUALITY` from one session.
+
 ## What the evidence currently says about the strategy
 
 Read this before building anything intended to improve returns.
