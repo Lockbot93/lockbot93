@@ -151,21 +151,36 @@ def fetch_live_positions() -> dict[str, dict]:
                 "protected": stop is not None,
             }
 
+        # Options have no broker-side bracket, so their levels come from
+        # config rather than from an order. They are no less real for it:
+        # these are the exact thresholds options_manager.py enforces every
+        # cycle, and showing a contract sitting two thirds of the way to
+        # its stop is the same useful fact for an option as for a share.
+        # Leaving them as None meant every option rendered a note instead
+        # of a track — accurate, and much less informative.
+        import lockbot_config as _cfg
+
+        stop_percent = getattr(_cfg, "OPTIONS_STOP_LOSS_PERCENT", 0.35)
+        target_percent = getattr(_cfg, "OPTIONS_TAKE_PROFIT_PERCENT", 0.50)
+
         for position in option_positions(raw):
             symbol = str(position.symbol).upper()
+            entry = float(position.avg_entry_price)
 
             result[symbol] = {
                 "kind": "option",
                 "qty": position.qty,
-                "entry": float(position.avg_entry_price),
+                "entry": entry,
                 "current": float(position.current_price or 0),
                 "pl": float(position.unrealized_pl or 0),
                 "pl_percent": float(position.unrealized_plpc or 0) * 100,
-                "stop": None,
-                "target": None,
-                # Options have no broker-side bracket on Alpaca.
-                # options_manager.py holds the stop in software.
+                "stop": entry * (1.0 - stop_percent) if entry else None,
+                "target": entry * (1.0 + target_percent) if entry else None,
+                # True only while options_manager is actually running,
+                # which the guard row reports separately. The flag here
+                # means "a stop exists", not "a stop is being enforced".
                 "protected": True,
+                "software_levels": True,
             }
 
         return result
@@ -688,6 +703,9 @@ _TEMPLATE = """<!doctype html>
 
   .empty { color: var(--ink-faint); font-size: 12px; padding: 13px 0; }
 
+  .hero-spark { margin-top: 16px; opacity: .8; }
+  .hero-spark svg { display: block; }
+
   footer { margin-top: 22px; padding-top: 13px; border-top: 1px solid var(--line);
            display: flex; gap: 22px; color: var(--ink-faint); font-size: 10px;
            letter-spacing: .14em; }
@@ -719,6 +737,10 @@ _TEMPLATE = """<!doctype html>
         <span class="delta-pct">__PNL_PCT__ today</span>
         <span class="chip __OVERALL__"><i class="dot"></i>__OVERALL_LABEL__</span>
       </div>
+      <!-- Equity curve sits beside the number it belongs to rather than
+           floating alone below the fold. The number gives the scale, so
+           the chart needs no axis. -->
+      <div class="hero-spark">__SPARKLINE__</div>
     </div>
     <div class="reactor">
       <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
@@ -727,8 +749,6 @@ _TEMPLATE = """<!doctype html>
       </div>
     </div>
   </div>
-
-  __SPARKLINE__
 
   <!-- Everything below is something you would ACT on. Universe size,
        incident counts, buying power, open hypotheses and the profile name
@@ -1085,6 +1105,12 @@ def _position_card(position: dict) -> str:
         pct = track["progress"] * 100
         entry_pct = track["entry_at"] * 100
 
+        # An option's levels are enforced by software, not by the broker.
+        # Saying so on the track keeps the distinction visible: a share's
+        # stop survives this machine being switched off, an option's does
+        # not.
+        origin = "sw" if position.get("software_levels") else ""
+
         body = (
             f'<div class="track">'
             f'<div class="track-fill" style="width:{pct:.1f}%"></div>'
@@ -1092,7 +1118,7 @@ def _position_card(position: dict) -> str:
             f'<div class="track-now" style="left:{pct:.1f}%"></div>'
             f"</div>"
             f'<div class="track-ends">'
-            f'<span class="crit">stop {position["stop"]:.2f}</span>'
+            f'<span class="crit">{origin} stop {position["stop"]:.2f}</span>'
             f'<span class="muted">{track["to_stop_percent"]:.1f}% away</span>'
             f'<span class="good">target {position["target"]:.2f}</span>'
             f"</div>"
@@ -1456,6 +1482,11 @@ def build_full_view(interval: int) -> dict:
                 "stop": data["stop"],
                 "target": data["target"],
                 "protected": data["protected"],
+                # Carried through so the card can say whose stop it is.
+                # This dict is rebuilt field by field, which is exactly how
+                # get_voice_state lost the speech timings — a copy that
+                # names its keys silently drops anything added upstream.
+                "software_levels": data.get("software_levels", False),
                 "track": track,
             }
         )
@@ -1791,6 +1822,45 @@ def _self_test() -> int:
 
     check("the orb has its reticle", 'class="tick"' in losing)
     check("and its radar wrapper", 'class="orb-wrap"' in losing)
+
+    print()
+    print("Options get a real stop-to-target track")
+
+    # Options have no broker bracket, so they used to render a note. The
+    # levels options_manager enforces are derivable, and a contract two
+    # thirds of the way to its stop is as useful to see as a share is.
+    opt = {
+        "symbol": "EWZ LONG_CALL", "kind": "option", "protected": True,
+        "software_levels": True, "entry": 0.74, "current": 0.60,
+        "pl": -14.0, "pl_percent": -18.9,
+        "stop": 0.74 * 0.65, "target": 0.74 * 1.50,
+    }
+    opt["track"] = track_position(
+        opt["entry"], opt["current"], opt["stop"], opt["target"]
+    )
+
+    card = _position_card(opt)
+    check("an option renders a track", 'class="track"' in card)
+    check("not the old placeholder note",
+          "software stop — options_manager holds it" not in card)
+    check("the stop is labelled as software-held", "sw stop" in card)
+    check("and a live marker is drawn", "track-now" in card)
+
+    # An equity position with a real broker bracket must NOT claim to be
+    # software-held.
+    eq = {
+        "symbol": "NVO", "kind": "equity", "protected": True,
+        "entry": 100.0, "current": 102.0, "pl": 2.0, "pl_percent": 2.0,
+        "stop": 96.0, "target": 108.0,
+    }
+    eq["track"] = track_position(
+        eq["entry"], eq["current"], eq["stop"], eq["target"]
+    )
+    check("a broker stop is not labelled software",
+          "sw stop" not in _position_card(eq))
+
+    check("the equity curve sits in the header",
+          'class="hero-spark"' in losing)
 
     print()
 
