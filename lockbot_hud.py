@@ -236,11 +236,16 @@ def entry_gates(state: dict) -> list[dict]:
             "detail": "unknown",
         })
 
+    # Two limits, easily confused. OPTIONS_MAX_OPEN_POSITIONS caps how many
+    # are HELD AT ONCE; OPTIONS_MAX_TRADES_PER_DAY caps how many are OPENED
+    # in a session. Reporting the first as "2/2 full" read like the day was
+    # finished when the daily budget was untouched -- the true state is
+    # "no room until one exits", which is a different thing to wait for.
     if options_max and options_held >= options_max:
         gates.append({
             "label": "OPTIONS SLOTS",
             "blocking": True,
-            "detail": f"{options_held}/{options_max} full",
+            "detail": f"{options_held}/{options_max} held · frees when one exits",
         })
 
     # The options daily counter lives in its own file, owned by
@@ -260,14 +265,54 @@ def entry_gates(state: dict) -> list[dict]:
 
             if options_max_trades and used >= options_max_trades:
                 gates.append({
-                    "label": "OPTIONS TRADES",
+                    "label": "OPTIONS DAILY CAP",
                     "blocking": True,
-                    "detail": f"{used}/{options_max_trades} today",
+                    "detail": f"{used}/{options_max_trades} opened · resets tomorrow",
                 })
     except Exception:
         pass
 
     return gates
+
+
+def options_counts(state: dict) -> dict:
+    """Held-at-once and opened-today, which are different limits.
+
+    OPTIONS_MAX_OPEN_POSITIONS caps concurrency; OPTIONS_MAX_TRADES_PER_DAY
+    caps the session. Showing only the first made a full slot look like a
+    finished day, when the daily budget can be entirely untouched.
+    """
+
+    held = len(state.get("option_positions_tracked", {}) or {})
+
+    try:
+        import lockbot_config as _cfg
+
+        max_held = getattr(_cfg, "OPTIONS_MAX_OPEN_POSITIONS", 0)
+        daily_cap = getattr(_cfg, "OPTIONS_MAX_TRADES_PER_DAY", 0)
+        path = getattr(_cfg, "OPTIONS_RISK_STATE_FILE", None)
+    except Exception:
+        return {"held": held, "max_held": 0, "used_today": 0, "daily_cap": 0}
+
+    used = 0
+
+    try:
+        if path and Path(path).exists():
+            raw = json.loads(Path(path).read_text(encoding="utf-8") or "{}")
+
+            # The counter resets on first read of a new date, so a stale
+            # trade_date means zero used today -- not the number written.
+            if raw.get("trade_date") == datetime.now().astimezone().date().isoformat():
+                used = int(raw.get("trades_submitted_today", 0) or 0)
+    except Exception:
+        pass
+
+    return {
+        "held": held,
+        "max_held": max_held,
+        "used_today": used,
+        "daily_cap": daily_cap,
+    }
 
 
 def fetch_live_positions() -> dict[str, dict]:
@@ -971,8 +1016,9 @@ _TEMPLATE = """<!doctype html>
       <span class="v">__OPTIONS_STOP__</span>
     </div>
     <div class="guard-cell">
-      <span class="k">DAY TRADES · PDT</span>
-      <span class="v">__TRADES__<em>/__MAX_TRADES__</em></span>
+      <span class="k">OPTIONS · HELD / OPENED TODAY</span>
+      <span class="v">__OPT_HELD__<em>/__OPT_MAX__ held</em>
+                      &nbsp;·&nbsp; __OPT_USED__<em>/__OPT_CAP__ today</em></span>
       <div class="pips">__PDT_PIPS__</div>
     </div>
     <div class="guard-cell __SHADOW_STATUS__">
@@ -1591,8 +1637,17 @@ def render(
             "<em>nothing blocking a new position</em></span></div>"
         )
 
+    # The two options limits, shown side by side so they cannot be read as
+    # one number. "2/2 held" and "0/4 today" mean very different things and
+    # conflating them made a full slot look like a finished session.
+    options_counts = view.get("options_counts") or {}
+
     replacements = {
         "__GATES__": gates_html,
+        "__OPT_HELD__": str(options_counts.get("held", 0)),
+        "__OPT_MAX__": str(options_counts.get("max_held", 0)),
+        "__OPT_USED__": str(options_counts.get("used_today", 0)),
+        "__OPT_CAP__": str(options_counts.get("daily_cap", 0)),
         "__PDT_PIPS__": pip_html,
         "__EDGE_BAR__": edge_html,
         "__OPTIONS_STOP__": options_stop_text,
@@ -1818,6 +1873,7 @@ def build_full_view(interval: int) -> dict:
     view["clock"] = fetch_market_clock()
     view["last_cycle"] = fetch_last_cycle()
     view["gates"] = entry_gates(state)
+    view["options_counts"] = options_counts(state)
 
     try:
         from lockbot_incidents import collect as collect_incidents
@@ -2243,14 +2299,51 @@ def _self_test() -> int:
           any(g["label"] == "DAILY LOSS LIMIT" for g in loss))
 
     # Full option slots block entries without anything being wrong.
-    full = entry_gates({"option_positions_tracked": {"a": {}, "b": {}}})
+    #
+    # Built from the configured cap rather than a hardcoded two, so raising
+    # OPTIONS_MAX_OPEN_POSITIONS does not silently turn this check into a
+    # test of nothing -- which is exactly what it did when the cap went
+    # from 2 to 3.
+    import lockbot_config as _test_cfg
+
+    cap = getattr(_test_cfg, "OPTIONS_MAX_OPEN_POSITIONS", 2)
+    full = entry_gates({
+        "option_positions_tracked": {str(i): {} for i in range(cap)}
+    })
     check("full option slots are reported",
           any(g["label"] == "OPTIONS SLOTS" for g in full), str(full))
+
+    not_full = entry_gates({
+        "option_positions_tracked": {str(i): {} for i in range(max(0, cap - 1))}
+    })
+    check("one free slot is not reported as blocking",
+          not any(g["label"] == "OPTIONS SLOTS" for g in not_full),
+          str(not_full))
 
     # Rendering: a blocked bot must say so, a clear one must say that too.
     blocked_html = render(build_view(state()), live=True).replace("&nbsp;", " ")
     check("the strip renders either way",
           "ENTRIES" in blocked_html and 'class="gate' in blocked_html)
+
+    # Full slots must not read as a finished day.
+    slots = [g for g in full if g["label"] == "OPTIONS SLOTS"]
+    check("full slots explain what frees them",
+          slots and "exits" in slots[0]["detail"], str(slots))
+
+    print()
+    print("Held-at-once and opened-today are shown separately")
+
+    counts = options_counts({"option_positions_tracked": {"a": {}, "b": {}}})
+    check("it counts what is held", counts["held"] == 2, str(counts))
+    check("and knows the concurrency cap", counts["max_held"] >= 1, str(counts))
+    check("and the daily cap", counts["daily_cap"] >= 1, str(counts))
+    check(
+        "the two caps are different numbers, not one",
+        counts["max_held"] != counts["daily_cap"],
+        f"held cap {counts['max_held']}, daily cap {counts['daily_cap']}",
+    )
+    check("both reach the markup",
+          "held" in blocked_html and "today" in blocked_html)
 
     print()
 

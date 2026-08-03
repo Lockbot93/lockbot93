@@ -509,7 +509,22 @@ OPTIONS_MAX_RISK_PER_TRADE_PERCENT = 0.10
 # backstop for the case where the stop is unusually tight.
 OPTIONS_MAX_PREMIUM_PERCENT = 0.30
 
-OPTIONS_MAX_OPEN_POSITIONS = 2
+# Raised from 2 on 2026-08-03.
+#
+# This does NOT add exposure. OPTIONS_MAX_TOTAL_PREMIUM_PERCENT caps the
+# total dollars in options at 60% of equity whatever the slot count is, so
+# raising concurrency splits the same money across more, smaller positions
+# rather than committing more of it. That is diversification, not leverage.
+#
+# The arithmetic at $270 of equity:
+#     2 slots -> $77.20 each   (the per-trade risk cap binds)
+#     3 slots -> $54.04 each   (the premium ceiling binds)
+#     4 slots -> $40.53 each   (below the cheapest contract seen, $43)
+#
+# Three is where it stops being useful: a fourth slot would shrink the
+# per-position budget below what any contract in the universe costs, so
+# it would exist without ever being fillable.
+OPTIONS_MAX_OPEN_POSITIONS = 3
 OPTIONS_MAX_TOTAL_PREMIUM_PERCENT = 0.60
 OPTIONS_MAX_CONTRACTS_PER_POSITION = 1
 OPTIONS_MAX_NEW_ENTRIES_PER_CYCLE = 1
