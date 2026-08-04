@@ -204,11 +204,18 @@ def entry_gates(state: dict) -> list[dict]:
             "detail": str(risk.get("kill_switch_reason") or "engaged"),
         })
 
-    if scanner.get("daily_loss_limit_hit"):
+    # Computed live rather than read from scanner_state, because that flag
+    # is written by market_scanner.py -- the equity path, which is switched
+    # off. Until 2026-08-04 the options path did not check this at all, so
+    # a -11.9% day passed with the HUD showing nothing.
+    budget = float(config_snapshot.get("max_daily_loss_percent", 0) or 0)
+    pnl_percent = float(scanner.get("daily_pnl_percent", 0) or 0)
+
+    if scanner.get("daily_loss_limit_hit") or (budget and pnl_percent <= -budget):
         gates.append({
             "label": "DAILY LOSS LIMIT",
             "blocking": True,
-            "detail": f"{config_snapshot.get('max_daily_loss_percent', 0):.0%} reached",
+            "detail": f"{pnl_percent:.1%} against a {budget:.0%} budget",
         })
 
     # Equity entries are a deliberate switch, not a fault. It reads as

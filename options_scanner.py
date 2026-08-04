@@ -540,6 +540,55 @@ def run_options_scanner() -> OptionsScannerSummary:
         account = trading_client.get_account()
         account_equity = float(account.equity)
 
+        # ---- Daily loss limit
+        #
+        # This gate lived only in market_scanner.py, so it protected the
+        # equity path -- which has been disabled since 2026-07-30 -- while
+        # options, the only thing actually trading, ignored it entirely.
+        #
+        # On 2026-08-03 the account fell $34.10 from $287.03, a 11.9% day
+        # against a 2% budget, and nothing stopped LOCKBOT opening more
+        # risk as it happened. lockbot_learn.py raised this as H12 that
+        # night; it was verified and closed here.
+        #
+        # It gates ENTRIES ONLY. options_manager.py must keep running its
+        # exits whatever the day has done -- refusing to close positions
+        # because the day is bad is how a bad day becomes a catastrophic
+        # one, and options have no broker-side stop to fall back on.
+        from risk_engine import check_daily_loss_limit
+
+        (
+            daily_loss_reached,
+            daily_pnl,
+            daily_pnl_percent,
+            daily_reason,
+        ) = check_daily_loss_limit(
+            account_equity,
+            float(account.last_equity or 0),
+        )
+
+        if daily_loss_reached:
+            summary.skip_reason = f"Daily loss limit: {daily_reason}"
+
+            mark_module_degraded(
+                MODULE_NAME,
+                message=(
+                    f"Daily loss limit reached ({daily_pnl_percent:.2%}). "
+                    "No new option entries today. Exits still run."
+                ),
+                details={"version": OPTIONS_SCANNER_VERSION},
+            )
+
+            print(
+                f"\nDAILY LOSS LIMIT REACHED — {daily_pnl_percent:.2%} "
+                f"(${daily_pnl:,.2f}) against a "
+                f"{config.MAX_DAILY_LOSS_PERCENT:.0%} budget.\n"
+                "No new option entries today. options_manager.py continues "
+                "to run exits on open positions."
+            )
+
+            return summary
+
         # Options buying power is NOT equity, and on a small account the two
         # diverge fast: on 2026-07-30 the account held $250 of equity but
         # only $16.82 of options buying power once two positions were open.
@@ -1353,6 +1402,25 @@ def _self_test() -> int:
           broken == 50.0, str(broken))
 
     check("quality is logged in the shadow columns", "quality" in SHADOW_COLUMNS)
+
+    print()
+    print("Daily loss limit reaches the options path")
+
+    from risk_engine import check_daily_loss_limit
+
+    # The real 2026-08-03 numbers.
+    hit, pnl, pct, _ = check_daily_loss_limit(252.93, 287.03)
+    check("a -11.9% day trips the limit", hit is True, f"{pct:.2%}")
+    check("and reports the damage", abs(pnl + 34.10) < 0.01, str(pnl))
+
+    ok, _, small_pct, _ = check_daily_loss_limit(285.0, 287.03)
+    check("a small loss does not", ok is False, f"{small_pct:.2%}")
+
+    fresh, _, _, _ = check_daily_loss_limit(250.0, 0.0)
+    check(
+        "a new account with no prior close is not blocked",
+        fresh is False,
+    )
 
     print()
     print("One underlying, one position")

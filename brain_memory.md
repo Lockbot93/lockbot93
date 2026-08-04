@@ -72,3 +72,45 @@ safe to edit or prune by hand.
 - **2026-08-02 22:29** — User prefers the en-GB-RyanNeural edge voice over the default en-GB-ThomasNeural; set via LOCKBOT_EDGE_VOICE in .env (brain cannot write .env itself, user must edit it).
 
 - **2026-08-02 23:38** — User asked (2026-08-03) for hourly profit updates during the trading session via Pushover briefings — wants P&L pushed every hour while the market is open, not just the profitable-account alert.
+
+- **2026-08-03 15:33** — FAILURE: No new incident fingerprints in the window: the Market Scanner session-boundary health-check cluster (26 occurrences) still shows last_seen 07-29 15:00 CT, and the 08-03 session is now the third consecutive clean session including open/close boundaries — leaning handled-or-dormant, but since no fix was ever identified, hold off recording it as handled until at least one more clean boundary.
+
+- **2026-08-03 15:33** — FAILURE: The four DNS-resolution cycle crashes remain the only environment failures, absorbed by the controller retry loop with no recurrence since 07-30 01:29 — environment, not a LOCKBOT defect.
+
+- **2026-08-03 15:33** — FAILURE: A recurring operational miss outside the incident feed: 4 of 10 option entry attempts since 07-30 ended ENTRY_NOT_FILLED (2 PBR, 2 IBIT), with retries at adjacent strikes within minutes — bookkeeping handles it correctly, but the entry pricing is missing fills 40% of the time, which is LOCKBOT behavior, not the environment.
+
+- **2026-08-03 15:33** — The resolved shadow sample doubled 55→107 since 07-30 and the strategy is now statistically distinguishable from breakeven for the first time: 23/107 wins (21.5%, −0.355R) puts the 95% CI upper bound at ~29.3%, below the 33.3% breakeven — with the caveat that the population mixes old fixed-bracket setups with newer ones and carries the previously noted fast-mover selection bias; the marginal 52 resolutions won only 8 (15.4%).
+
+- **2026-08-03 15:33** — The volume-ratio inversion recorded on 07-29 (37.5%→26.7%→25.0% monotone) did not survive the doubled sample: buckets are now 21.1% (n=19), 18.5% (n=27), 23.0% (n=61) with no monotone pattern, so the original inversion was noise; the ratio is logged at weight zero and inert regardless.
+
+- **2026-08-03 15:33** — The JD bull call spread ledger has been corrected: the impossible −155% loss is now recorded as $24 debit / $16 credit / −$8 (−33.3%), consistent with the −35% stop — the defined-risk violation was a ledger error, since fixed, superseding the 07-30 18:32 note.
+
+- **2026-08-03 15:33** — EWZ260821C00037000 exited with reason STOP_LOSS on 08-03 at only −8.1% of its $74 entry debit; the $68 exit credit is ≈65% of a ~$105 peak, suggesting the −35% options stop is measured from highest_value (a trailing stop) rather than entry debit — unconfirmed, but if true the real max loss per option trade is smaller than the sizing note assumed while winners get stopped out on givebacks.
+
+- **2026-08-03 15:33** — A single option stop-loss overwhelms the daily loss budget: −35% of a typical $50-75 debit is $17-26 against a 2%-of-equity budget of ~$5, and on 07-30 the ASHR stop alone (−$11) breached the limit by mid-morning, locking equity entries for the rest of the day — a cross-module interaction (10% option risk cap vs 2% daily loss cap) not previously recorded.
+
+- **2026-08-03 15:33** — The equity entry drought has extended to a third consecutive session (07-30, 07-31, 08-03) with zero entries despite 388 BUY_LONG signals in the window, while options entered twice on 08-03 alone; the daily loss limit cannot explain 07-31, which was a +$39 day, so the cause remains unattributed.
+
+- **2026-08-04 07:50** — The shadow sample contains zero SHORT rows despite ~412 SELL_SHORT signals per window; shadow_trades.py's resolver fully supports SHORT (self-tests cover it), so the gap is at the recording call in the scanner — the discarded half of the signal engine is going unmeasured for free.
+
+- **2026-08-04 07:55** — 2026-08-04: Regime split at n=107 resolved is STRONG_UPTREND 8/50 (16.0%, −0.52R) vs WEAK_UPTREND 15/57 (26.3%, −0.21R), but Fisher two-tail p≈0.24 — still not distinguishable from noise, and both regimes sit below the 33.3% breakeven; any STRONG_UPTREND block is damage limitation on a losing strategy, not a statistically supported edge.
+
+- **2026-08-04 08:24** — Equity entry drought cause located: market_scanner.py gates all share order submission on EQUITY_ENTRIES_ENABLED with an explicit skip message ("approved but EQUITY_ENTRIES_ENABLED is False — no share orders will be submitted. Shadow logging continues."), and the surrounding comment describes deliberately parking capital in options while shadow logging measures the edge — so the three-session drought is very likely this flag set False on purpose, not a defect; confirm the value in the first ~600 lines of lockbot_config.py.
+
+- **2026-08-04 08:24** — The SHORT shadow gap mechanism: market_scanner.py builds shadow rows only from `approved` (results with trade_approved=True), and the shadow writer itself handles SHORT correctly — but SELL_SHORT signals are rejected upstream (SHORT_EXECUTION_NOT_ENABLED, 337/4000 rows) before reaching `approved`, so they never hit record_candidates. Fix belongs at the approval loop, not shadow_trades.py.
+
+- **2026-08-04 08:31** — CONFIRMED 2026-08-04: EQUITY_ENTRIES_ENABLED = False in lockbot_config.py, set deliberately on 2026-07-30 to park capital in options while shadow logging continues — the three-session equity entry drought (07-30/07-31/08-03) was intentional, not a defect; case closed, do not re-investigate.
+
+- **2026-08-04 15:31** — FAILURE: No new incident fingerprints this window: the Market Scanner session-boundary health-check cluster (20 occurrences) still shows last_seen 07-29 15:00 CT, and 08-04 is now the fourth consecutive clean session including open/close boundaries — per the 08-03 plan this is now recorded as dormant/effectively handled; reopen only if it recurs.
+
+- **2026-08-04 15:31** — FAILURE: The four DNS-resolution cycle crashes (07-29/30) remain the only environment failures, absorbed correctly by the controller retry loop with no recurrence since 07-30 01:29 — environment, not a LOCKBOT defect.
+
+- **2026-08-04 15:31** — 2026-08-04 was a −$34.10 (−11.9%) day — roughly 6× the 2% daily loss budget — driven by options (EWZ spread stop −$17 plus open-position marks); equity fell from $263.50 to $252.93, giving back nearly all gains above the ~$250 start, and the profitable-account condition is only barely still met.
+
+- **2026-08-04 15:31** — DAILY_LOSS_LIMIT_REACHED rejections jumped from 1,175 to 3,871 of the last 4,000 signal rows — a near-total lockout of the window — but the limit only suppresses the equity path, which is already disabled by EQUITY_ENTRIES_ENABLED=False, so it currently constrains nothing that is taking risk.
+
+- **2026-08-04 15:31** — The PCG put's highest_value reached exactly +50.0% of its entry debit ($84.00 against $56.000…01) without triggering the +50% take-profit — consistent with a strict-inequality or float-epsilon boundary miss — and the gain has since sat unrealized; if the suspected peak-referenced −35% stop is real, the position would now exit near breakeven instead of +50%. Latent bookkeeping/comparison issue, n=1.
+
+- **2026-08-04 15:31** — The 08-04 EWZ bull call spread exited STOP_LOSS at −39.5% of its $43 debit, ~4.5 points beyond the −35% threshold — software stops can exceed the configured loss by execution slippage (about $2 here); small but worth tracking as options are the only active risk-taker.
+
+- **2026-08-04 15:31** — Shadow resolved grew 107→119 with 24 wins (20.2%, −0.395R, Wilson 95% upper ≈28%, still below the 33.3% breakeven); the regime gap widened slightly to STRONG_UPTREND 8/59 (13.6%) vs WEAK_UPTREND 16/60 (26.7%), two-tail p roughly 0.08–0.11 — tightening from p≈0.24 at n=107 but still not significant; the marginal 12 resolutions (1 win) are too few to read alone.
