@@ -673,6 +673,73 @@ NOTIFY_REPEAT_COOLDOWN_MINUTES = 120
 # want twice if it happened twice: TRADE_COMPLETED, BUY_ORDER_SUBMITTED,
 # SHORT_ORDER_SUBMITTED, OPTIONS_ORDER_SUBMITTED, DAILY_REPORT.
 
+# ============================================================
+# Buy-and-hold ETF portfolio
+# ============================================================
+#
+# A different animal from everything else in this file. No signals, no
+# stops, no exits, no timing — a fixed allocation bought and held,
+# rebalanced only when it drifts. The trading engine has a measured
+# negative edge; this does not depend on picking anything.
+#
+# It shares the brokerage account with the trading bot, so two rules keep
+# them apart:
+#
+#   1. Symbols in ETF_TARGET_ALLOCATION are RESERVED. position_filters.py
+#      hides them from market_scanner, position_monitor and startup
+#      reconciliation, so the trading engine cannot count them toward its
+#      position cap or try to exit them.
+#   2. ETF_PORTFOLIO_BUDGET is a hard ceiling in dollars. The portfolio
+#      never spends beyond it, so it cannot quietly consume the cash the
+#      options side needs.
+#
+# Starts DISABLED and in plan-only mode. Nothing is bought until both are
+# changed deliberately.
+ETF_PORTFOLIO_ENABLED = False
+
+# When False the module reports what it WOULD do and places nothing.
+ETF_PORTFOLIO_LIVE = False
+
+# Hard ceiling on capital committed to the portfolio, in dollars.
+# Deliberately small: at $253 equity with $164 cash, the options side
+# needs room to keep operating while this is evaluated.
+ETF_PORTFOLIO_BUDGET = 100.00
+
+# Target weights. Must sum to 1.0.
+#
+# Chosen for what FITS, not for a market view. Under the `small` profile
+# only whole shares are possible, and at a $100 budget that rules out
+# almost everything: SPY $771, VOO $709, QQQ $724, VTI $381, QQQM $298.
+#
+# SCHG is how growth is reachable at all. A single $35 share holds NVDA,
+# MSFT, AAPL, AMZN and META — none of which can be bought individually
+# here, since one NVDA share is $212 and one MSFT share is $493. The
+# affordable individual growth names are speculative small caps, which is
+# a different bet from "growth".
+#
+# SCHD balances it with dividend and value exposure at a similar price.
+#
+# International sleeves (VEA $72, VWO $60) are deliberately absent: at a
+# $100 budget a 20% target is $20, which buys none of either. They belong
+# here once the budget can carry them, and the module will say so rather
+# than silently under-allocating.
+ETF_TARGET_ALLOCATION = {
+    "SCHG": 0.50,   # US large-cap growth — NVDA, MSFT, AAPL, AMZN, META
+    "SCHD": 0.50,   # US dividend / value, as ballast
+}
+
+# Rebalance when a sleeve drifts this far from target, in percentage
+# POINTS. At 10, a 40% sleeve is left alone between 30% and 50%.
+# Rebalancing more often than that just pays spread to chase noise.
+ETF_REBALANCE_DRIFT_POINTS = 10.0
+
+# Never place a rebalancing order smaller than this. On a $100 budget a
+# "correcting" trade of a few dollars costs more in spread than the drift
+# it fixes.
+ETF_MIN_REBALANCE_DOLLARS = 25.00
+
+ETF_PORTFOLIO_STATE_FILE = PROJECT_FOLDER / "etf_portfolio_state.json"
+
 OPTIONS_STATE_FILE = PROJECT_FOLDER / "options_position_state.json"
 OPTIONS_PENDING_FILE = PROJECT_FOLDER / "options_pending_trades.csv"
 OPTIONS_SHADOW_FILE = PROJECT_FOLDER / "options_shadow_log.csv"

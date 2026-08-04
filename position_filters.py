@@ -42,19 +42,66 @@ def asset_class_of(position: Any) -> str:
     return str(getattr(raw, "value", raw) or "").strip().lower()
 
 
-def equity_positions(positions: Any) -> list:
+def reserved_symbols() -> set[str]:
+    """Symbols the trading engine must pretend it cannot see.
+
+    The buy-and-hold ETF portfolio lives in the same brokerage account as
+    the trading bot, and the broker makes no distinction between them. To
+    market_scanner.py a held SCHD position is simply an open equity
+    position: it counts toward MAX_OPEN_POSITIONS, position_monitor.py
+    watches it for exits it should never take, and
+    startup_reconciliation.py reports it as untracked.
+
+    None of that is wrong exactly -- the position IS there -- but a
+    long-term holding is not a trade, and a system that treats it as one
+    will eventually try to manage it. Reserving the symbols is what keeps
+    the two strategies from fighting over the same shares.
+
+    Read live from config so adding an ETF to the portfolio takes effect
+    without editing this file.
     """
-    Return only the share positions.
+
+    try:
+        import lockbot_config as config
+
+        allocation = getattr(config, "ETF_TARGET_ALLOCATION", {}) or {}
+
+        return {str(symbol).upper() for symbol in allocation}
+    except Exception:
+        return set()
+
+
+def equity_positions(positions: Any, *, include_reserved: bool = False) -> list:
+    """
+    Return only the share positions the TRADING engine owns.
+
+    Portfolio holdings are excluded by default. Pass include_reserved=True
+    when you genuinely want every share position -- the portfolio module
+    itself does, and so does anything reporting total account exposure.
 
     A position with no asset_class at all is treated as equity, because
     that is what every position was before options were added and the
     equity path must keep working against older or mocked objects.
     """
 
-    return [
+    shares = [
         position
         for position in (positions or [])
         if asset_class_of(position) in {US_EQUITY, ""}
+    ]
+
+    if include_reserved:
+        return shares
+
+    reserved = reserved_symbols()
+
+    if not reserved:
+        return shares
+
+    return [
+        position
+        for position in shares
+        if str(getattr(position, "symbol", "")).upper() not in reserved
     ]
 
 
