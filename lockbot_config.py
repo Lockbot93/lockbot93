@@ -832,6 +832,42 @@ def validate_options_configuration() -> None:
         )
 
 
+# ============================================================
+# Runtime overrides
+# ============================================================
+#
+# Applied AFTER every default above and BEFORE validate_configuration(),
+# so a remotely changed setting is still subject to every safety check in
+# this file. runtime_settings.py decides what may be changed; this only
+# applies what it allows.
+#
+# Components are spawned fresh each cycle, so an override takes effect on
+# the next cycle without a restart.
+#
+# PAPER_TRADING and LIVE_TRADING_ENABLED are not on that allowlist and
+# cannot arrive here. The boundary between fake and real money stays a
+# code change made by a person at the keyboard.
+try:
+    from runtime_settings import load_overrides as _load_overrides
+
+    _OVERRIDES = _load_overrides()
+
+    for _name, _value in _OVERRIDES.items():
+        globals()[_name] = _value
+
+    if _OVERRIDES:
+        print(
+            "Runtime overrides applied: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(_OVERRIDES.items()))
+        )
+
+except Exception as _override_error:      # pragma: no cover
+    # A broken overrides layer must never stop LOCKBOT starting. The
+    # defaults above are already loaded and are the safe fallback.
+    print(f"Runtime overrides skipped: {type(_override_error).__name__}")
+    _OVERRIDES = {}
+
+
 def validate_configuration() -> None:
     """Raise an error when a shared configuration value is unsafe."""
 

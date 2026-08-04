@@ -785,6 +785,85 @@ def build_tools() -> list:
         return json.dumps(status(), indent=2, default=str)
 
     @beta_tool
+    def list_settings() -> str:
+        """List the settings that can be changed while LOCKBOT is running,
+        their allowed ranges, and which are currently overridden.
+
+        Use this before change_setting when unsure of a name or a bound.
+        """
+
+        from runtime_settings import describe
+
+        return describe()
+
+    @beta_tool
+    def change_setting(name: str, value: str) -> str:
+        """CHANGES A LIVE RISK SETTING. Requires confirmation.
+
+        Writes to a runtime overrides file that lockbot_config.py applies
+        at import. It does NOT edit any code. The change takes effect on
+        the next cycle, because components are spawned fresh.
+
+        Only names on the allowlist in runtime_settings.py are accepted,
+        each within a fixed range. PAPER_TRADING and LIVE_TRADING_ENABLED
+        are NOT on that list and cannot be changed here — moving between
+        fake and real money requires someone at the keyboard.
+
+        If a request falls outside the bounds, say so and stop. Do not
+        suggest editing the file directly to get around it.
+
+        Args:
+            name: The setting, e.g. OPTIONS_MAX_SPREAD_PERCENT.
+            value: The new value. "off"/"false" work for switches.
+        """
+
+        from runtime_settings import set_override, validate
+
+        name = name.strip().upper()
+
+        ok, why = validate(name, value)
+
+        if not ok:
+            return f"REFUSED: {why}"
+
+        refusal = _guard(
+            "CHANGE SETTING",
+            f"{name} -> {value}. Alters live risk behaviour from the next "
+            "cycle.",
+        )
+
+        if refusal:
+            return refusal
+
+        ok, message = set_override(name, value, who="assistant")
+
+        return message if ok else f"REFUSED: {message}"
+
+    @beta_tool
+    def reset_setting(name: str) -> str:
+        """Remove a runtime override so the value in lockbot_config.py
+        applies again. Requires confirmation.
+
+        Args:
+            name: The setting to reset.
+        """
+
+        from runtime_settings import clear_override
+
+        name = name.strip().upper()
+
+        refusal = _guard(
+            "RESET SETTING", f"{name} back to its file default."
+        )
+
+        if refusal:
+            return refusal
+
+        ok, message = clear_override(name, who="assistant")
+
+        return message if ok else f"REFUSED: {message}"
+
+    @beta_tool
     def control_lockbot(action: str) -> str:
         """CONTROLS THE RUNNING SYSTEM. Start, stop or restart the LOCKBOT
         controller, or clear out stale sessions.
@@ -866,6 +945,9 @@ def build_tools() -> list:
         get_process_status,
         read_project_file,
         remember,
+        list_settings,
+        change_setting,
+        reset_setting,
         control_lockbot,
         run_lockbot_component,
         close_position,
