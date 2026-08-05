@@ -616,6 +616,60 @@ OPTIONS_STOP_CONFIRM_CYCLES = 2
 OPTIONS_MAX_IV_PREMIUM = 1.60
 OPTIONS_MAX_DAILY_THETA = 0.030
 
+# Whether an event is scheduled inside the holding period.
+#
+# Added 2026-08-04, and the last of the blind spots in contract
+# selection. LOCKBOT could not tell whether a company reported earnings
+# tomorrow, which is the classic way to be right about direction and
+# lose money regardless: implied volatility inflates before the report
+# and collapses the moment it lands.
+#
+# There is no earnings calendar behind this. Alpaca does not sell one,
+# and the free alternatives are scrapers that break silently. Instead
+# event_risk.py reads it out of the option prices already flowing —
+# implied volatility normally RISES with time to expiry, so when the
+# near month costs more than the far month, the market is pricing
+# something it knows about and LOCKBOT does not. That also catches FDA
+# decisions, court rulings and index rebalances, which an earnings
+# calendar would miss entirely.
+#
+# The number is near-dated IV divided by far-dated, at a matched strike.
+# Under 1.0 is the normal ordering.
+#
+# THIS THRESHOLD IS THE LEAST-EVIDENCED NUMBER IN THE GATE. Sixteen live
+# symbols on 2026-08-04 read as:
+#
+#   0.87 0.88 0.88 0.89 0.96 0.97 | 1.00 1.07 1.09 1.09 | 1.11 1.13
+#   1.20 1.20 1.36 3.81
+#
+# There is a real gap between the 0.87-0.97 cluster and everything above
+# 1.07, which is the split this is meant to catch. Where to cut inside
+# the 1.00-1.20 band is a judgement, not a measurement: 1.10 refuses six
+# of sixteen, 1.15 refuses four, 1.25 refuses two.
+#
+# 1.10 is the conservative choice and is chosen deliberately. Refusing a
+# trade costs an opportunity in a system whose measured edge is negative
+# anyway; taking one into a volatility crush costs money. The slope is
+# now written to options_shadow_log.csv for every candidate, passed or
+# refused, so this can be re-derived from outcomes instead of judgement
+# once there are enough of them.
+#
+# NOT YET VERIFIED: that a flagged name resolves after its event. A
+# stock whose term structure is permanently inverted -- distressed
+# names, heavy short interest -- would be refused forever by a check
+# that cannot tell the difference. That needs several days of logged
+# slopes per symbol to answer and cannot be settled from one session.
+#
+# Like the cost gates above this is a mechanism, not a prediction, so it
+# does not wait on shadow evidence. Unlike them it can be switched off
+# outright, because it costs an extra chain fetch per candidate.
+#
+# NOTE: this assumes LOCKBOT is BUYING premium, which it is. A premium
+# seller wants exactly the inversion this refuses. If that ever changes
+# the gate must be inverted, not disabled.
+OPTIONS_EVENT_RISK_ENABLED = True
+OPTIONS_MAX_TERM_INVERSION = 1.10
+
 # Contract selection. Delta near 0.50 is at-the-money; lower delta
 # is cheaper but needs a bigger move to pay. The DTE window keeps
 # LOCKBOT away from the last two weeks of an option's life, where

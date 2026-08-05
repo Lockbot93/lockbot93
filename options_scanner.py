@@ -78,6 +78,15 @@ SHADOW_COLUMNS = [
     "spread_percent",
     "delta",
     "days_to_expiration",
+    # Added 2026-08-04 with the event-risk gate, and logged rather than
+    # merely enforced on purpose. A gate that only ever refuses trades
+    # leaves no way to ask afterwards how often it was right, or how
+    # often it had an answer at all -- the free feed drops greeks
+    # routinely, and an UNKNOWN rate of 80% would mean the check is
+    # decorative. That question is unanswerable unless the verdict is
+    # written down on every candidate, including the ones it passed.
+    "event_risk",
+    "term_slope",
     "action",
     "reason",
 ]
@@ -1002,6 +1011,52 @@ def run_options_scanner() -> OptionsScannerSummary:
                 )
                 continue
 
+            # ---- Is anything SCHEDULED to happen before this expires?
+            #
+            # The last blind spot in contract selection. Every gate above
+            # asks about the contract; none asked what is going to happen
+            # to the underlying while the position is held. Buying an
+            # option into an earnings report is the reliable way to be
+            # right about direction and lose money anyway — implied
+            # volatility inflates beforehand and collapses on the news.
+            #
+            # There is no earnings calendar behind this; Alpaca does not
+            # sell one. event_risk.py infers it from the shape of the
+            # chain instead, which also catches FDA decisions and court
+            # rulings that a calendar would miss. See its docstring.
+            #
+            # Measured HERE, above the shadow-mode branch, rather than
+            # beside the block it drives further down. Options entries
+            # are currently paused, so a check that ran only on live
+            # entries would produce no evidence at all for as long as the
+            # pause lasts — and the argument for pausing was that
+            # measurement is worth more than code. The verdict goes on
+            # every shadow row whether or not it refuses anything.
+            event = None
+
+            if getattr(config, "OPTIONS_EVENT_RISK_ENABLED", True):
+                try:
+                    from event_risk import (
+                        measure_event_risk, explain as explain_event
+                    )
+
+                    event = measure_event_risk(
+                        option_data,
+                        underlying_symbol=symbol,
+                        underlying_price=candidate["price"],
+                        contract_type=contract_type,
+                        max_dte=config.OPTIONS_MAX_DTE,
+                        max_inversion=getattr(
+                            config, "OPTIONS_MAX_TERM_INVERSION", 1.10),
+                    )
+                    summary.chains_fetched += 1
+
+                    print(f"  Event risk: {explain_event(event)}")
+
+                except Exception as event_error:
+                    print(f"  Event check unavailable: "
+                          f"{type(event_error).__name__}: {event_error}")
+
             shadow_row = {
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "underlying": symbol,
@@ -1019,6 +1074,9 @@ def run_options_scanner() -> OptionsScannerSummary:
                 "spread_percent": round(long_quote.spread_percent * 100, 2),
                 "delta": long_quote.delta if long_quote.delta is not None else "",
                 "days_to_expiration": long_quote.days_to_expiration,
+                "event_risk": (
+                    event.verdict if event is not None else "NOT_CHECKED"),
+                "term_slope": event.slope if event is not None else "",
             }
 
             if config.OPTIONS_SHADOW_MODE:
@@ -1104,6 +1162,27 @@ def run_options_scanner() -> OptionsScannerSummary:
                 # either, and each attempt is a broker round trip that ends
                 # in the same rejection.
                 break
+
+            # The reading was taken above; this is only the decision.
+            #
+            # UNKNOWN does not block, for the same reason it does not in
+            # the cost gate: greeks go missing on the indicative feed
+            # routinely, and refusing every unreadable chain would stop
+            # options trading rather than protect it. UNKNOWN is still
+            # not CLEAR — it is recorded as itself so the shadow log can
+            # later answer how often this check had an answer at all.
+            if event is not None and event.blocks_entry:
+                from event_risk import explain as explain_event
+
+                print("  Rejected: an event is priced in before expiry.")
+                summary.rejection_reasons["EVENT_BEFORE_EXPIRY"] = (
+                    summary.rejection_reasons.get("EVENT_BEFORE_EXPIRY", 0) + 1
+                )
+                append_shadow_row({
+                    **shadow_row, "action": "EVENT_RISK",
+                    "reason": explain_event(event),
+                })
+                continue
 
             try:
                 request = build_open_request(

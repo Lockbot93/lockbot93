@@ -85,6 +85,17 @@ ALLOWED: dict[str, tuple] = {
     "OPTIONS_MAX_DAILY_THETA": (
         float, 0.010, 0.100,
         "Time decay per day as a fraction of premium."),
+
+    # Added 2026-08-04 with the event-risk gate. Registered at the same
+    # time as the gate itself rather than afterwards -- the IV settings
+    # above were added without it and the omission was only found later
+    # by the recommendation tests.
+    "OPTIONS_EVENT_RISK_ENABLED": (
+        bool, None, None,
+        "Refuse entries when an event is priced in before expiry."),
+    "OPTIONS_MAX_TERM_INVERSION": (
+        float, 1.00, 2.00,
+        "Near-dated IV as a multiple of far-dated. Above 1.0 is inverted."),
 }
 
 
