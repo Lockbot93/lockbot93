@@ -1188,10 +1188,24 @@ def run_options_manager() -> OptionsManagerSummary:
 
                     position.exit_order_id = None
 
-                if config.OPTIONS_SHADOW_MODE:
-                    print(f"{label}: SHADOW MODE — no exit order was sent.")
-                    position.exit_reason = decision.reason
-                    continue
+                # Shadow mode does NOT block exits. It never should have.
+                #
+                # It was written when there were no positions, where it
+                # sensibly meant "decide but do not trade". Once contracts
+                # are held the same flag means something entirely
+                # different: refusing to close a position that has hit its
+                # stop, on an instrument with no broker-side stop to fall
+                # back on.
+                #
+                # On 2026-08-04 options were paused into shadow mode to
+                # stop losses while the edge is measured, and it silently
+                # removed the only protection the two open positions had.
+                # Pausing entries is a strategy decision; abandoning open
+                # risk is not the same thing and must not be a side effect
+                # of it.
+                #
+                # Entries are gated in options_scanner.py, which is where
+                # shadow mode belongs.
 
                 if value is None:
                     print(
@@ -1369,7 +1383,15 @@ def print_summary(summary: OptionsManagerSummary) -> None:
     print("=" * 56)
     print(f"       LOCKBOT OPTIONS MANAGER v{OPTIONS_MANAGER_VERSION}")
     print("=" * 56)
-    print(f"Mode            : {'SHADOW' if config.OPTIONS_SHADOW_MODE else 'LIVE'}")
+    # The exit engine is always live. Shadow mode pauses ENTRIES, in
+    # options_scanner.py; saying "SHADOW" here implied the stop had been
+    # switched off, which is precisely the misreading that made disabling
+    # exits look acceptable in the first place.
+    print(
+        "Mode            : EXITS ALWAYS LIVE"
+        + ("  (entries paused — shadow mode)" if config.OPTIONS_SHADOW_MODE
+           else "")
+    )
     print(f"Tracked Before  : {summary.tracked_before}")
     print(f"Broker Positions: {summary.broker_positions}")
     print(f"Holding         : {summary.holding}")
@@ -1647,6 +1669,51 @@ def _self_test() -> int:
         "a naive entry timestamp does not raise",
         entry_pending_too_long(naive, now=reference) is True,
     )
+
+    print()
+    print("Shadow mode must never disarm the stop")
+
+    # Pausing entries on 2026-08-04 silently removed the only protection
+    # two open positions had, because shadow mode was checked in the exit
+    # path. Options have no broker-side stop; this file IS the stop.
+    real_shadow = config.OPTIONS_SHADOW_MODE
+
+    try:
+        config.OPTIONS_SHADOW_MODE = True
+
+        stopping = make()
+        stopping.entry_debit = 100.0
+        stopping.entry_time = "2026-08-01T14:00:00+00:00"
+        stopping.expiration = "2026-08-21"
+
+        rules_now = dict(
+            now=datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc),
+            today=date(2026, 8, 4),
+            take_profit_percent=0.50,
+            stop_loss_percent=0.35,
+            max_hold_days=10,
+            min_dte_exit=14,
+        )
+
+        first = decide_exit(stopping, 60.0, **rules_now)
+        second = decide_exit(stopping, 60.0, **rules_now)
+
+        check(
+            "a stop still fires while entries are paused",
+            second.should_exit is True and second.reason == STOP_LOSS,
+            f"{second.reason} after {first.reason}",
+        )
+        check(
+            "take profit also still fires",
+            decide_exit(make(), 200.0, **rules_now).should_exit is True,
+        )
+        check(
+            "and the near-expiry rule",
+            decide_exit(make(dte=5), 100.0, **rules_now).should_exit is True,
+        )
+
+    finally:
+        config.OPTIONS_SHADOW_MODE = real_shadow
 
     print()
     print("A stop must survive a second look")

@@ -496,7 +496,25 @@ OPTIONS_ENABLED = True
 # Flip back to True for a no-risk observation session at any time; it is
 # the complete off switch for options order submission and needs no
 # other change.
-OPTIONS_SHADOW_MODE = False
+# Paused 2026-08-04. Trading stops; measurement does not.
+#
+# The shadow log is written by the SCANNER, not by fills, so every
+# decision is still ranked and recorded — the candidate quality
+# distribution, the resolvers at 3:15 and the learning pass at 3:30 all
+# carry on exactly as before. Nothing about the experiment slows down.
+#
+# What stops is paying for it. Over 119 resolved setups the signal wins
+# 20.2% against a 41.2% breakeven on the options bands, and at 10% risk
+# per trade that is roughly -5.55% of the account per trade: half of it
+# gone in about twelve trades. The information learned per trade is
+# identical at any size, and identical again at zero size.
+#
+# Open positions are unaffected. options_manager.py continues to run its
+# exits — pausing entries must never mean abandoning what is already held.
+#
+# Set back to False when the evidence supports it, which is what
+# signal_research.py and backtest.py exist to establish.
+OPTIONS_SHADOW_MODE = True
 
 # Hard ceiling on what one option trade may lose, as a fraction of
 # equity. Premium x stop-loss percent must land under this or the
