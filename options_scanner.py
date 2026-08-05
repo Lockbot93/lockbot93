@@ -1028,6 +1028,62 @@ def run_options_scanner() -> OptionsScannerSummary:
                 print("  SHADOW MODE — logged, no order sent.")
                 continue
 
+            # ---- What the contract costs to OWN, not just to trade
+            #
+            # Every gate above asks whether a contract is tradable. None
+            # asked whether it is expensive. LOCKBOT read implied
+            # volatility off the feed and threw it away, so it could not
+            # tell a fairly priced option from an overpriced one.
+            #
+            # The PCG put it holds is 1.83x: 48% implied against 26% the
+            # underlying actually moves, decaying 3.6% a day. The IBIT
+            # call is 0.96x and decays 2.3%. Same gates passed both.
+            #
+            # This is a COST check, not a prediction, which is why it is
+            # gated on without waiting for shadow evidence — the same
+            # reasoning that justified the spread gate. It does not claim
+            # low IV predicts direction. It measures what holding costs.
+            cost = None
+
+            try:
+                from options_knowledge import assess_cost, explain
+
+                cost = assess_cost(
+                    implied_vol=getattr(long_quote, "implied_volatility", None),
+                    underlying_closes=[
+                        float(bar.close) for bar in
+                        (result.get("df_5m", {}).get("close", []) or [])
+                    ] or candidate.get("closes", []),
+                    theta=getattr(long_quote, "theta", None),
+                    premium_per_share=limit_per_contract,
+                    days_to_expiration=long_quote.days_to_expiration,
+                    max_iv_premium=getattr(
+                        config, "OPTIONS_MAX_IV_PREMIUM", 1.60),
+                    max_daily_theta=getattr(
+                        config, "OPTIONS_MAX_DAILY_THETA", 0.030),
+                )
+
+                print(f"  Cost: {explain(cost)}")
+
+            except Exception as cost_error:
+                print(f"  Cost check unavailable: "
+                      f"{type(cost_error).__name__}: {cost_error}")
+
+            # UNKNOWN does not block. A missing IV is not evidence the
+            # option is dear, and refusing every contract whose greeks
+            # are absent would stop trading on the indicative feed
+            # entirely -- greeks go missing there routinely.
+            if cost is not None and cost.verdict == "EXPENSIVE":
+                print("  Rejected: the contract is expensive to hold.")
+                summary.rejection_reasons["EXPENSIVE_TO_HOLD"] = (
+                    summary.rejection_reasons.get("EXPENSIVE_TO_HOLD", 0) + 1
+                )
+                append_shadow_row({
+                    **shadow_row, "action": "TOO_EXPENSIVE",
+                    "reason": explain(cost),
+                })
+                continue
+
             can_afford, afford_reason = affordable_now(
                 debit, options_buying_power=options_buying_power
             )

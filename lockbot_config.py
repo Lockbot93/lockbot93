@@ -593,6 +593,29 @@ OPTIONS_ENTRY_LIMIT_BUFFER_PERCENT = 0.03
 # the old immediate behaviour.
 OPTIONS_STOP_CONFIRM_CYCLES = 2
 
+# What a contract may cost to OWN, as opposed to to trade.
+#
+# Added 2026-08-04. Every other gate asks whether a contract is tradable;
+# these ask whether it is expensive. LOCKBOT had been reading implied
+# volatility off the feed and discarding it, so it could not tell an
+# overpriced option from a fair one.
+#
+# OPTIONS_MAX_IV_PREMIUM is implied volatility divided by the underlying's
+# REALISED volatility. 1.0 is fairly priced. The PCG put currently held
+# is 1.83x — 48% implied against 26% of actual movement — and the IBIT
+# call is 0.96x. The same gates passed both.
+#
+# OPTIONS_MAX_DAILY_THETA is time decay as a fraction of premium per day.
+# That PCG position loses 3.6% daily to theta alone, 61% across the
+# remaining hold. Over a 21-45 day window this is the largest single cost
+# in the trade and nothing looked at it before.
+#
+# These are COSTS, not predictions, which is why they gate without
+# waiting for shadow evidence — the same argument that justified the
+# spread gate. Neither claims low IV predicts direction.
+OPTIONS_MAX_IV_PREMIUM = 1.60
+OPTIONS_MAX_DAILY_THETA = 0.030
+
 # Contract selection. Delta near 0.50 is at-the-money; lower delta
 # is cheaper but needs a bigger move to pay. The DTE window keeps
 # LOCKBOT away from the last two weeks of an option's life, where
