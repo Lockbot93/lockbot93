@@ -197,6 +197,84 @@ def _file_age_hours(path: Path) -> float | None:
         return None
 
 
+def _what_is_live(config: Any) -> dict[str, str]:
+    """Which paths are submitting orders right now, stated in words.
+
+    WHY THIS IS NOT JUST THE FLAGS
+
+    The flags were already in the snapshot and the answer was still
+    wrong. Asked "are options entries paused", with options_shadow_mode
+    sitting at true right there in the configuration block, the reply
+    was that options were "enabled and actively entering ... flagged as
+    shadow-mode paper trades" -- reading shadow mode as a kind of paper
+    trading rather than as no orders at all, and then blaming the pause
+    on the equity path.
+
+    A flag named shadow_mode does not say what it does, and "is it
+    trading right now" is the one question about a trading bot that must
+    never be answered by inference. So it is answered here, in the
+    snapshot, in a sentence, rather than left to be reconstructed from
+    three booleans whose names only make sense if you wrote them.
+
+    Exits are listed separately and deliberately. Pausing entries must
+    never read as pausing exits -- an option position with no software
+    stop is unprotected capital, and that danger was created once
+    already by turning shadow mode on.
+    """
+
+    def flag(name: str, default: bool = False) -> bool:
+        return bool(getattr(config, name, default))
+
+    options_on = flag("OPTIONS_ENABLED", True)
+    options_shadow = flag("OPTIONS_SHADOW_MODE")
+
+    if not options_on:
+        options_entries = (
+            "OFF — OPTIONS_ENABLED is False. The options scanner does not run."
+        )
+    elif options_shadow:
+        options_entries = (
+            "PAUSED — OPTIONS_SHADOW_MODE is True. Candidates are ranked and "
+            "written to options_shadow_log.csv, and NO orders are submitted. "
+            "This is not paper trading; it is no trading."
+        )
+    else:
+        options_entries = "LIVE — option entry orders are being submitted."
+
+    if flag("EQUITY_ENTRIES_ENABLED", True):
+        equity_entries = "LIVE — share entry orders are being submitted."
+    else:
+        equity_entries = (
+            "PAUSED — EQUITY_ENTRIES_ENABLED is False. Setups are still "
+            "scanned and shadow-logged, but no share orders are submitted."
+        )
+
+    return {
+        "equity_entries": equity_entries,
+        "options_entries": options_entries,
+        "options_exits": (
+            "ALWAYS LIVE — options_manager.py evaluates and closes open "
+            "option positions on every cycle regardless of shadow mode. It "
+            "is the only stop loss options have."
+        ),
+        "equity_exits": (
+            "BROKER-SIDE — the bracket order submitted with the entry is the "
+            "sole exit. ENABLE_PAPER_EXITS is False and position_monitor "
+            "only alerts."
+        ),
+        "etf_portfolio": (
+            "ENABLED — buy-and-hold, separate from the trading engine."
+            if flag("ETF_PORTFOLIO_ENABLED") else "OFF."
+        ),
+        "money": (
+            "PAPER — PAPER_TRADING is True and LIVE_TRADING_ENABLED is "
+            "False. No real money is at risk on any path."
+            if flag("PAPER_TRADING", True)
+            else "REAL MONEY — live trading is enabled."
+        ),
+    }
+
+
 def collect_state() -> dict[str, Any]:
     """
     Gather everything LOCKBOT knows into one snapshot.
@@ -255,6 +333,7 @@ def collect_state() -> dict[str, Any]:
 
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "what_is_actually_live": _what_is_live(config),
         "configuration": config.configuration_summary(),
         "module_health": module_health,
         "scanner_state": scanner_state,
@@ -1951,12 +2030,47 @@ def _self_test() -> int:
 
     for key in (
         "configuration",
+        "what_is_actually_live",
         "module_health",
         "shadow_summary",
         "signal_summary",
         "risk_state",
     ):
         check(f"snapshot has {key}", key in state)
+
+    # "Is it trading right now" must be answerable by reading, never by
+    # inferring from flag names. It was inferred once and got it wrong.
+    live = state["what_is_actually_live"]
+
+    for key in ("equity_entries", "options_entries", "options_exits",
+                "equity_exits", "money"):
+        check(f"live status covers {key}", key in live)
+
+    check(
+        "every live status says PAUSED, LIVE, OFF or names the mechanism",
+        all(
+            any(word in text for word in
+                ("PAUSED", "LIVE", "OFF", "PAPER", "REAL MONEY",
+                 "BROKER-SIDE", "ENABLED"))
+            for text in live.values()
+        ),
+        str(live),
+    )
+
+    check(
+        "exits are reported separately from entries",
+        "options_exits" in live and "ALWAYS LIVE" in live["options_exits"],
+        live.get("options_exits", ""),
+    )
+
+    import lockbot_config as _cfg
+
+    if getattr(_cfg, "OPTIONS_SHADOW_MODE", False):
+        check(
+            "shadow mode is described as no trading, not paper trading",
+            "no trading" in live["options_entries"].lower(),
+            live["options_entries"],
+        )
 
     check(
         "snapshot serializes to JSON",
