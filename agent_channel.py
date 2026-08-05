@@ -291,6 +291,54 @@ def _event(
     return True
 
 
+def amend_subject(
+    item_id: str,
+    new_subject: str,
+    by: str = "agent",
+    *,
+    path: Path | None = None,
+) -> bool:
+    """Correct an item's subject line without rewriting history.
+
+    The log is append-only, so the fix for a bad subject is not to edit
+    the line -- it is to append a correction that reading applies. The
+    original stays on the record as original_subject, which matters: a
+    channel where text can be silently changed after the fact is not
+    evidence of anything.
+
+    Exists because item 734d2e7a was filed through a shell that ate its
+    dollar sign, leaving "exactly \\.00" where "exactly $84.00" belonged.
+    """
+
+    if not str(new_subject or "").strip():
+        return False
+
+    by = str(by or "").strip().lower()
+
+    if by not in SENDERS or not item_id:
+        return False
+
+    if not any(i["id"] == item_id for i in items(path=path)):
+        return False
+
+    record = {
+        "event": "amended",
+        "item": str(item_id),
+        "at": _now(),
+        "by": by,
+        "subject": str(new_subject).strip()[:200],
+        "note": "subject corrected",
+    }
+
+    try:
+        with Path(path or CHANNEL_FILE).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        return False
+
+    return True
+
+
 def mark_applied(
     item_id: str, by: str = "agent", note: str = "", *, path: Path | None = None
 ) -> bool:
@@ -419,7 +467,20 @@ def items(*, path: Path | None = None) -> list[dict]:
 
         entry = dict(record)
         events = history.get(str(record["id"]), [])
-        last = events[-1] if events else None
+
+        # An amendment corrects text; it is not a lifecycle step, so it
+        # must not decide status. Without this, correcting a subject
+        # would silently close or reopen the item.
+        lifecycle = [e for e in events if e.get("event") != "amended"]
+        last = lifecycle[-1] if lifecycle else None
+
+        amendments = [e for e in events if e.get("event") == "amended"]
+
+        if amendments:
+            entry["original_subject"] = entry.get("subject", "")
+            entry["subject"] = amendments[-1].get(
+                "subject", entry.get("subject", ""))
+            entry["amended"] = True
 
         entry["events"] = events
         entry["status"] = (
@@ -798,6 +859,40 @@ def _self_test() -> int:
     check("and its rejection reason is shown",
           "no it is not" in text, text[:400])
     resolve(loud, "agent", path=log)
+
+    print()
+    print("Correcting text without rewriting history")
+
+    typo = post("lockbot", "reads exactly \\.00", "body", kind="bug", path=log)
+    mark_applied(typo, "agent", "fixed", path=log)
+
+    check("an empty subject is refused",
+          amend_subject(typo, "   ", path=log) is False)
+    check("an unknown id is refused",
+          amend_subject("nope", "x", path=log) is False)
+
+    check("the subject can be corrected",
+          amend_subject(typo, "reads exactly $84.00", path=log) is True)
+
+    amended = [i for i in items(path=log) if i["id"] == typo][0]
+    check("and reads corrected", amended["subject"] == "reads exactly $84.00",
+          amended["subject"])
+    check("the original is still on the record",
+          amended["original_subject"] == "reads exactly \\.00",
+          amended.get("original_subject", ""))
+    check("and it is marked as amended", amended.get("amended") is True)
+
+    # The bug this guards: an amendment is not a lifecycle event, so it
+    # must not silently close or reopen anything.
+    check("amending does not change status", amended["status"] == APPLIED,
+          amended["status"])
+
+    verify(typo, "lockbot", True, "checked", path=log)
+    after = [i for i in items(path=log) if i["id"] == typo][0]
+    check("the correction survives a later event",
+          after["subject"] == "reads exactly $84.00", after["subject"])
+    check("and the lifecycle still completed",
+          after["status"] == VERIFIED, after["status"])
 
     print()
     print("A test must never reach the phone")
