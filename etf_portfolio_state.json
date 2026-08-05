@@ -1,0 +1,28 @@
+{
+    "established": "2026-08-04T23:34:44+00:00",
+    "contributions": 0.0,
+    "events": [
+        {
+            "at": "2026-08-04T23:34:44+00:00",
+            "orders": [
+                "buy 1 SCHD",
+                "buy 1 SCHG"
+            ],
+            "results": [
+                "BUY 1 SCHD @ limit 34.19 -> order fake-order",
+                "BUY 1 SCHG @ limit 35.85 -> order fake-order"
+            ]
+        },
+        {
+            "at": "2026-08-05T00:14:15+00:00",
+            "orders": [
+                "buy 1 SCHD",
+                "buy 1 SCHG"
+            ],
+            "results": [
+                "BUY 1 SCHD @ limit 34.19 -> order fake-order",
+                "BUY 1 SCHG @ limit 35.85 -> order fake-order"
+            ]
+        }
+    ]
+}

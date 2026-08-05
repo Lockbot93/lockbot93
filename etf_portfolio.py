@@ -42,6 +42,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import lockbot_config as config
 
@@ -311,6 +312,113 @@ def fetch_holdings(symbols: list[str]) -> dict[str, int]:
         return {}
 
 
+def execute_plan(plan: Plan, *, client: Any = None) -> list[str]:
+    """Place the plan's orders. Returns a line per attempt.
+
+    Refuses unless ETF_PORTFOLIO_ENABLED and ETF_PORTFOLIO_LIVE are BOTH
+    true. Two flags rather than one is deliberate: the first says the
+    portfolio exists, the second says it may spend money, and enabling
+    reporting should never be one typo away from placing orders.
+
+    Buys use a limit a little above the last price rather than a market
+    order. A market order on a thin ETF can fill well outside the quote,
+    and the whole point of this sleeve is that it is boring.
+
+    Sells are placed only when rebalancing says so, and never as a stop --
+    this module has no stops by design.
+    """
+
+    enabled = getattr(config, "ETF_PORTFOLIO_ENABLED", False)
+    live = getattr(config, "ETF_PORTFOLIO_LIVE", False)
+
+    if not (enabled and live):
+        return ["REFUSED: ETF_PORTFOLIO_ENABLED and ETF_PORTFOLIO_LIVE must "
+                "both be True. Nothing was ordered."]
+
+    if not plan.orders:
+        return ["Nothing to do; the portfolio already matches its target."]
+
+    # Never spend past the budget, whatever the plan says. The plan is
+    # built from prices that may have moved since.
+    if plan.invested > plan.budget:
+        return [f"REFUSED: plan would commit ${plan.invested:,.2f} against a "
+                f"${plan.budget:,.2f} budget."]
+
+    if client is None:
+        from rearm_brackets import _client
+
+        client = _client()
+
+    try:
+        clock = client.get_clock()
+
+        if not clock.is_open:
+            return ["Market is closed. The plan stands; nothing was ordered."]
+    except Exception as error:
+        return [f"REFUSED: could not read the market clock "
+                f"({type(error).__name__}). Not ordering blind."]
+
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import LimitOrderRequest
+
+    priced = {s.symbol: s.price for s in plan.sleeves}
+    results = []
+
+    for symbol, quantity, side in plan.orders:
+        if quantity <= 0:
+            continue
+
+        price = priced.get(symbol, 0.0)
+
+        if price <= 0:
+            results.append(f"{symbol}: skipped, no price to limit against.")
+            continue
+
+        # A small buffer so the order is marketable without being a
+        # market order. Buying pays slightly up, selling accepts slightly
+        # down.
+        limit = price * (1.01 if side == "buy" else 0.99)
+
+        try:
+            order = client.submit_order(order_data=LimitOrderRequest(
+                symbol=symbol,
+                qty=quantity,
+                side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+                type="limit",
+                limit_price=round(limit, 2),
+                time_in_force=TimeInForce.DAY,
+            ))
+            results.append(
+                f"{side.upper()} {quantity} {symbol} @ limit "
+                f"{limit:.2f} -> order {order.id}"
+            )
+        except Exception as error:
+            results.append(
+                f"{symbol}: order failed ({type(error).__name__}: {error})"
+            )
+
+    # Record what was attempted. This sleeve has no journal of its own and
+    # the broker's order history is the only other trace.
+    try:
+        state = load_state()
+        state.setdefault("events", []).append({
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "orders": [f"{s} {q} {sym}" for sym, q, s in plan.orders],
+            "results": results,
+        })
+
+        if not state.get("established"):
+            state["established"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+
+        save_state(state)
+    except Exception:
+        pass
+
+    return results
+
+
 def report(plan: Plan) -> None:
     """Print the plan in a form that can be acted on or ignored."""
 
@@ -388,6 +496,14 @@ def run() -> Plan:
     )
 
     report(plan)
+
+    if getattr(config, "ETF_PORTFOLIO_ENABLED", False) and getattr(
+        config, "ETF_PORTFOLIO_LIVE", False
+    ):
+        print()
+        print("EXECUTING")
+        for line in execute_plan(plan):
+            print(f"  {line}")
 
     return plan
 
@@ -515,6 +631,90 @@ def _self_test() -> int:
     check("no price means no order", plan.orders == [], str(plan.orders))
     check("and a warning", any("no price" in w for w in plan.warnings),
           str(plan.warnings))
+
+    print()
+    print("Execution refuses unless BOTH flags are set")
+
+    class FakeClock:
+        is_open = True
+
+    class FakeClient:
+        def __init__(self, open_market=True):
+            self.submitted = []
+            self._open = open_market
+
+        def get_clock(self):
+            clock = FakeClock()
+            clock.is_open = self._open
+            return clock
+
+        def submit_order(self, order_data=None, **kwargs):
+            self.submitted.append(order_data)
+
+            class R:
+                id = "fake-order"
+
+            return R()
+
+    buyable = build_plan(
+        {"SCHG": 0.5, "SCHD": 0.5},
+        {"SCHG": 35.50, "SCHD": 33.85},
+        {}, 100.0,
+    )
+
+    real_enabled = getattr(config, "ETF_PORTFOLIO_ENABLED", False)
+    real_live = getattr(config, "ETF_PORTFOLIO_LIVE", False)
+
+    try:
+        config.ETF_PORTFOLIO_ENABLED = False
+        config.ETF_PORTFOLIO_LIVE = True
+        client = FakeClient()
+        out = execute_plan(buyable, client=client)
+        check("disabled portfolio places nothing",
+              not client.submitted and "REFUSED" in out[0], str(out))
+
+        config.ETF_PORTFOLIO_ENABLED = True
+        config.ETF_PORTFOLIO_LIVE = False
+        client = FakeClient()
+        out = execute_plan(buyable, client=client)
+        check("plan-only places nothing",
+              not client.submitted and "REFUSED" in out[0], str(out))
+
+        config.ETF_PORTFOLIO_ENABLED = True
+        config.ETF_PORTFOLIO_LIVE = True
+
+        client = FakeClient(open_market=False)
+        out = execute_plan(buyable, client=client)
+        check("a closed market places nothing",
+              not client.submitted and "closed" in out[0].lower(), str(out))
+
+        client = FakeClient()
+        out = execute_plan(buyable, client=client)
+        check("both flags plus an open market DOES order",
+              len(client.submitted) == 2, str(out))
+        check("as limit orders, not market",
+              all(getattr(o, "limit_price", None) for o in client.submitted),
+              str(client.submitted))
+
+        # A plan that would overspend must be refused outright.
+        over = build_plan({"SCHG": 1.0}, {"SCHG": 35.50}, {}, 100.0)
+        over.invested = 500.0
+        client = FakeClient()
+        out = execute_plan(over, client=client)
+        check("overspending is refused",
+              not client.submitted and "REFUSED" in out[0], str(out))
+
+        settled = build_plan(
+            {"SCHG": 1.0}, {"SCHG": 35.50}, {"SCHG": 2}, 100.0
+        )
+        client = FakeClient()
+        out = execute_plan(settled, client=client)
+        check("a portfolio already on target does nothing",
+              not client.submitted, str(out))
+
+    finally:
+        config.ETF_PORTFOLIO_ENABLED = real_enabled
+        config.ETF_PORTFOLIO_LIVE = real_live
 
     print()
     print("The trading engine cannot see these symbols")

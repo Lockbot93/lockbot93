@@ -695,10 +695,16 @@ NOTIFY_REPEAT_COOLDOWN_MINUTES = 120
 #
 # Starts DISABLED and in plan-only mode. Nothing is bought until both are
 # changed deliberately.
-ETF_PORTFOLIO_ENABLED = False
+# Enabled 2026-08-04, for a bounded purpose: verifying the plumbing, not
+# testing whether broad ETFs go up. That question does not need a paper
+# account. What does need checking is whether the reserved-symbol
+# mechanism holds against a REAL holding — it has only ever been tested
+# against synthetic positions, and this week produced four separate bugs
+# that passed their tests and failed in reality.
+ETF_PORTFOLIO_ENABLED = True
 
 # When False the module reports what it WOULD do and places nothing.
-ETF_PORTFOLIO_LIVE = False
+ETF_PORTFOLIO_LIVE = True
 
 # Hard ceiling on capital committed to the portfolio, in dollars.
 # Deliberately small: at $253 equity with $164 cash, the options side
