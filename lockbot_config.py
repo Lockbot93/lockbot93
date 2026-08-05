@@ -442,6 +442,15 @@ RISK_STATE_FILE = PROJECT_FOLDER / "risk_state.json"
 NOTIFICATION_STATE_FILE = PROJECT_FOLDER / "notification_state.json"
 SIGNALS_FILE = PROJECT_FOLDER / "signals.csv"
 
+# What was said, so the next answer knows it. Added 2026-08-04 -- every
+# Telegram message was answered from a standing start until then.
+#
+# Credentials are stripped before anything is written here, but this is
+# still a plaintext record of everything typed at a system holding live
+# broker keys. It is not in the same class as the trading data files:
+# deleting it loses conversation history and nothing else.
+CONVERSATION_LOG_FILE = PROJECT_FOLDER / "conversation_log.jsonl"
+
 
 # ============================================================
 # OPTIONS TRADING

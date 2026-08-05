@@ -1439,11 +1439,29 @@ def brief(send: bool = True) -> str:
     return text
 
 
-def ask(question: str, state: dict | None = None) -> str:
-    """Answer one question about LOCKBOT."""
+def ask(
+    question: str,
+    state: dict | None = None,
+    history: list[dict] | None = None,
+) -> str:
+    """Answer one question about LOCKBOT.
+
+    `history` is prior turns in message format, oldest first. Without it
+    this is a standing start every time, which is how the Telegram
+    channel behaved for its whole existence -- "what about the other
+    one?" had no other one. chat() below has always kept its own running
+    list, so the same assistant was coherent at the keyboard and
+    amnesiac on the phone.
+
+    The caller owns the history and its bounds. See
+    conversation_memory.py for why it is capped by both count and age.
+    """
 
     client = _client()
     state = state if state is not None else collect_state()
+
+    messages = list(history or [])
+    messages.append({"role": "user", "content": question})
 
     runner = client.beta.messages.tool_runner(
         model=MODEL,
@@ -1451,7 +1469,7 @@ def ask(question: str, state: dict | None = None) -> str:
         output_config={"effort": EFFORT_CHAT},
         system=[{"type": "text", "text": _system_prompt()}, _state_block(state)],
         tools=build_tools(),
-        messages=[{"role": "user", "content": question}],
+        messages=messages,
     )
 
     final = ""

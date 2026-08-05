@@ -234,8 +234,23 @@ def simulate_symbol(
             continue
 
         # ---- look for a new entry
+        # Every field strategy_lab.FIELDS advertises must be present.
+        #
+        # This map used to carry seven keys while FIELDS promised
+        # thirteen, and compile_spec answers NO_TRADE on a missing key
+        # rather than raising. So any proposal referencing volume simply
+        # never fired -- not rejected, not errored, just permanently
+        # silent, and indistinguishable in the results from a rule that
+        # had been tested and found worthless.
+        #
+        # That mattered: the strongest lead in the shadow data is that
+        # volume ranks setups the wrong way round, and it was the one
+        # thing the search could not have looked at.
         try:
             row_map = {
+                "open": float(row.open),
+                "high": high,
+                "low": low,
                 "close": float(row.close),
                 "ema_9": float(row.ema_9),
                 "ema_21": float(row.ema_21),
@@ -243,6 +258,9 @@ def simulate_symbol(
                 "rsi": float(row.rsi),
                 "macd": float(row.macd),
                 "macd_signal": float(row.macd_signal),
+                "atr": float(row.atr),
+                "volume": float(row.volume),
+                "volume_avg_20": float(row.volume_avg_20),
             }
         except (AttributeError, TypeError, ValueError):
             continue
@@ -404,6 +422,7 @@ def _self_test() -> int:
         for i, price in enumerate(prices):
             rows.append({
                 "timestamp": base + timedelta(minutes=5 * i),
+                "open": price,
                 "close": price,
                 "high": price * 1.005,
                 "low": price * 0.995,
@@ -413,8 +432,25 @@ def _self_test() -> int:
                 "rsi": 60.0,
                 "macd": 1.0,
                 "macd_signal": 0.5,
+                "atr": price * 0.01,
+                "volume": 100_000.0,
+                "volume_avg_20": 80_000.0,
             })
         return pd.DataFrame(rows)
+
+    # The fixture must carry every field a rule is allowed to reference.
+    # It did not, and the gap was invisible: compile_spec answers
+    # NO_TRADE on a missing key, so a rule using volume looked tested and
+    # worthless rather than never run at all. Asserting the contract here
+    # is what stops that drifting apart again.
+    try:
+        from strategy_lab import FIELDS as ALLOWED_FIELDS
+
+        check("the fixture supplies every field a rule may reference",
+              ALLOWED_FIELDS <= set(frame_from([100.0]).columns),
+              f"missing {sorted(ALLOWED_FIELDS - set(frame_from([100.0]).columns))}")
+    except ImportError:
+        check("strategy_lab importable for the field contract", False)
 
     always_long = lambda row, trend: "BUY_LONG"
     never = lambda row, trend: "NO_TRADE"

@@ -114,8 +114,13 @@ Commands
 /brief    short written briefing
 /analyze  full analysis (slow, ~25c)
 /notes    what I've learned so far
+/recall   search everything we've said — /recall IBIT
 /flatten  EMERGENCY — cancel orders, close everything
 /help     this message
+
+I remember our recent conversation, so follow-up questions work — ask
+"why?" or "what about the other one?" and I'll know what you mean.
+Older exchanges stay searchable with /recall.
 
 I answer questions and place no trades. The only exception is /flatten,
 which is there for when the code looks wrong, not when a trade looks bad."""
@@ -444,13 +449,24 @@ def _do_flatten() -> str:
 # Routing
 # ---------------------------------------------------------------------------
 
-def handle_message(text: str, user_id: int, executor=None) -> str:
+def handle_message(
+    text: str,
+    user_id: int,
+    executor=None,
+    *,
+    remember: bool = True,
+) -> str:
     """
     Turn one incoming message into a reply.
 
     Pure routing over the brain and the local readers, so the whole
     surface can be exercised offline. `executor` is forwarded to the
     flatten path so tests can route a real challenge without a broker.
+
+    `remember` is what makes a conversation a conversation rather than a
+    series of unrelated questions. Set False in tests so they do not
+    write to the real transcript -- and note that turning it off makes
+    follow-up questions stop working, which is the point of it being on.
     """
 
     text = (text or "").strip()
@@ -479,6 +495,25 @@ def handle_message(text: str, user_id: int, executor=None) -> str:
     if command == "flatten":
         return request_flatten(user_id)
 
+    # Recall searches the whole transcript. Continuity below only
+    # replays the last few turns, so anything older than the window is
+    # reachable this way rather than not at all.
+    if command == "recall":
+        import conversation_memory
+
+        term = text.split(maxsplit=1)[1] if len(text.split()) > 1 else ""
+
+        if not term:
+            info = conversation_memory.stats()
+            return (
+                f"{info.get('exchanges', 0)} exchange(s) remembered.\n"
+                "Usage: /recall <term>"
+            )
+
+        return conversation_memory.format_hits(
+            conversation_memory.search(term, user_id=user_id), term
+        )
+
     try:
         import lockbot_brain
 
@@ -489,15 +524,36 @@ def handle_message(text: str, user_id: int, executor=None) -> str:
         lockbot_brain.CONFIRM = lambda *_: False
 
         if command == "brief":
-            return lockbot_brain.brief(send=False)
+            reply = lockbot_brain.brief(send=False)
+        elif command == "analyze":
+            reply = lockbot_brain.analyze()
+        else:
+            history = []
 
-        if command == "analyze":
-            return lockbot_brain.analyze()
+            if remember:
+                import conversation_memory
 
-        return lockbot_brain.ask(text)
+                history = conversation_memory.as_messages(
+                    conversation_memory.recent(user_id)
+                )
+
+            reply = lockbot_brain.ask(text, history=history)
 
     except Exception as error:
         return f"Something broke answering that: {type(error).__name__}: {error}"
+
+    # Recorded after the answer, so a failed turn does not enter the
+    # transcript as an exchange that never happened. Credentials are
+    # stripped on the way in -- see conversation_memory.redact.
+    if remember and reply:
+        try:
+            import conversation_memory
+
+            conversation_memory.record(user_id, text, reply)
+        except Exception:
+            pass
+
+    return reply
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +874,104 @@ def _self_test() -> int:
     check_that("no broker was contacted", "test double" in reply, reply[:80])
 
     _PENDING_FLATTEN.clear()
+
+    print()
+    print("Conversation memory")
+
+    # The brain is replaced with a double: these checks are about what
+    # gets remembered and replayed, and must not cost an API call.
+    import sys as _sys
+    import tempfile
+    import types
+
+    import conversation_memory
+
+    seen: list[dict] = []
+
+    double = types.ModuleType("lockbot_brain")
+    double.READ_ONLY = False
+    double.CONFIRM = None
+
+    def fake_ask(question, state=None, history=None):
+        seen.append({"question": question, "history": list(history or [])})
+        return f"answered: {question}"
+
+    double.ask = fake_ask
+    double.brief = lambda send=True: "brief"
+    double.analyze = lambda: "analysis"
+
+    real_brain = _sys.modules.get("lockbot_brain")
+    _sys.modules["lockbot_brain"] = double
+
+    real_transcript = conversation_memory.TRANSCRIPT_FILE
+    conversation_memory.TRANSCRIPT_FILE = (
+        Path(tempfile.mkdtemp()) / "conversation_log.jsonl"
+    )
+
+    try:
+        reply = handle_message("what is the shadow win rate", 7)
+        check_that("a plain question reaches the brain", len(seen) == 1)
+        check_that("with no history on the first turn",
+                   seen[0]["history"] == [], str(seen[0]["history"]))
+        check_that("and the answer comes back", "answered" in reply)
+
+        reply = handle_message("why?", 7)
+        check_that("the second turn carries history",
+                   len(seen[1]["history"]) == 2,
+                   str(len(seen[1]["history"])))
+        check_that("the earlier question is in it",
+                   "shadow win rate" in seen[1]["history"][0]["content"])
+        check_that("so is the earlier answer",
+                   "answered" in seen[1]["history"][1]["content"])
+        check_that("history is oldest first",
+                   seen[1]["history"][0]["role"] == "user")
+
+        # Another user's conversation must not leak into this one.
+        handle_message("unrelated question", 8)
+        check_that("a different user starts clean",
+                   seen[2]["history"] == [], str(seen[2]["history"]))
+
+        # This is the whole point of the feature, stated as a check.
+        handle_message("and the other one?", 7)
+        replayed = " ".join(m["content"] for m in seen[3]["history"])
+        check_that("a follow-up can see what came before",
+                   "shadow win rate" in replayed and "why?" in replayed)
+
+        hits = handle_message("/recall shadow", 7)
+        check_that("/recall finds a past exchange", "shadow win rate" in hits,
+                   hits[:100])
+        check_that("/recall with no term reports the count",
+                   "exchange" in handle_message("/recall", 7))
+        check_that("/recall does not reach the brain", len(seen) == 4,
+                   str(len(seen)))
+
+        seen.clear()
+        handle_message("a private question", 7, remember=False)
+        check_that("remember=False sends no history",
+                   seen[0]["history"] == [])
+        handle_message("did that get stored", 7, remember=False)
+        check_that("and stores nothing", seen[1]["history"] == [],
+                   str(seen[1]["history"]))
+
+        # A turn that raised must not be recorded as an exchange.
+        def broken_ask(question, state=None, history=None):
+            raise RuntimeError("model unavailable")
+
+        double.ask = broken_ask
+        before = len(conversation_memory.recent(7, limit=100))
+        reply = handle_message("this will fail", 7)
+        check_that("a failed turn reports the failure",
+                   "Something broke" in reply, reply[:60])
+        check_that("and is not recorded as an exchange",
+                   len(conversation_memory.recent(7, limit=100)) == before)
+
+    finally:
+        conversation_memory.TRANSCRIPT_FILE = real_transcript
+
+        if real_brain is not None:
+            _sys.modules["lockbot_brain"] = real_brain
+        else:
+            _sys.modules.pop("lockbot_brain", None)
 
     print()
     print("Status rendering")
