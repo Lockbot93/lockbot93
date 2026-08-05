@@ -260,6 +260,59 @@ loses money faster in contracts. `OPTIONS_SHADOW_MODE` is `True` for this
 reason. Resolve more shadow trades before spending effort on new features —
 measurement is worth more than code here.
 
+## The entry signal has no directional edge (searched 2026-08-04)
+
+The shadow finding above is thin — 55 trades, one regime. `rule_search.py`
+answered the same question on 384,700 bars across 123 sessions and 40
+symbols, and the answer is not thin.
+
+**864 candidate rules were generated** from combinations of trend, MACD,
+price against VWAP and EMA, five RSI bands and three volume conditions.
+621 produced enough trades to rank. Sessions were split chronologically at
+2026-06-11; the search never saw the holdout.
+
+**Zero of the 621 cleared breakeven — in training.** Not "the winner failed
+out of sample": nothing led even on the data it was fitted to. The best was
+32.3% against a 33.3% requirement. That is a stronger result than
+overfitting, because overfitting needs noise to exploit. When 621 rules
+cannot be made to look good on their own training data, the signal is not
+there to find.
+
+The mechanism, measured on the live rule:
+
+    reward  bars  entries  timeout  targets  stops    win     b/e    avgR
+      1.00    24     8664      89%      438    479  47.8%   50.0%  -0.04
+      1.43    24     8590      92%      174    474  26.9%   41.2%  -0.35
+      2.00    24     8568      94%       55    473  10.4%   33.3%  -0.69
+      3.00    24     8561      94%        7    472   1.5%   25.0%  -0.94
+
+Two things are visible and they are different.
+
+**The target is unreachable at the bracket LOCKBOT actually uses.** At 2:1,
+94% of entries never touch either band inside the holding window, and 55
+targets print against 473 stops. Widening the target does not widen the
+payout, it removes the payout — which is the same conclusion the 2026-08-04
+reward sweep reached, now with the mechanism attached.
+
+**Underneath that, there is no edge at all.** At 1:1, where a 2% move is
+genuinely reachable, the rule wins 47.8% against the 50% it needs. That is
+a coin flip, slightly worse — and this simulation charges no spread and
+fills at exact stop and target, so live is worse than the coin.
+
+So the negative results at 2:1 and 3:1 are the geometry, and the coin flip
+at 1:1 is the signal. Fixing the geometry would move LOCKBOT from losing
+badly to losing slowly. Neither is a strategy.
+
+What this does NOT say: that these indicators can never work. It says they
+do not work on *this* universe at *this* holding period with *these* bands,
+and that searching the same space harder is answered. A different search
+space — different holding period, different universe, or data these
+indicators cannot see — is the only thing that changes the answer.
+
+Do not build entry-side features on the current signal. Cost and hazard
+controls (spread, IV, theta, event risk) are still worth having, because
+they reduce what a bad trade costs and do not depend on the signal working.
+
 ## Conventions
 
 Module docstrings explain **why**, not just what, and record the bug that
