@@ -313,6 +313,52 @@ Do not build entry-side features on the current signal. Cost and hazard
 controls (spread, IV, theta, event risk) are still worth having, because
 they reduce what a bad trade costs and do not depend on the signal working.
 
+## Start here: `python agent_channel.py`
+
+**Run it at the start of every session, before anything else.** It prints
+what LOCKBOT is waiting on. This file is loaded automatically; the channel
+is not, so an item nobody reads is an item nobody fixes.
+
+LOCKBOT diagnoses problems it cannot fix — it has no write access to its own
+code, by design. On 2026-08-04 it root-caused two real bugs over Telegram,
+wrote a patch for each into a sandbox that does not mount this folder, and
+both were lost. The next morning it reported, correctly and uselessly, that
+both were diagnosed, fixed and unapplied, with no way for anyone to tell it
+otherwise. Meanwhile `56.00000000000001` sat in a status dump that had
+already been read past. Diagnosis, fix and reader all existed. There was no
+wire.
+
+The loop, and every part of it is load-bearing:
+
+    LOCKBOT files          file_for_engineer, with an acceptance test
+    you implement          normally, with judgement — see below
+    you record             python agent_channel.py --applied <id> --note "..."
+    LOCKBOT verifies       verify_fix — it checks, then confirms or REJECTS
+    only then              the item closes
+
+**`--applied` does not close an item.** Applying a patch and fixing a bug are
+different things, and this is the mechanism that keeps them apart. LOCKBOT's
+own PCG fix was a correct diagnosis carrying an incomplete patch: it named
+the two code paths it knew about and missed `options_scanner.py`, which mints
+the same dirty value for every new position. Applied and closed, that bug
+would have been recorded as fixed while still live. The side that reported
+the problem is the side that can see whether it went away, so it gets the
+last word — including the word "no", which reopens the item with a reason.
+
+**Do not implement a filed item by pasting its suggested fix.** The diagnosis
+is usually excellent and the proposed patch is frequently incomplete, for a
+structural reason: LOCKBOT reads source through one tool and cannot grep the
+whole tree, so it fixes what it can see. Treat the body as a bug report, find
+every affected path yourself, and prefer a chokepoint over patching call
+sites — that is what turned the PCG fix from two edits into one constructor.
+
+Write the regression test first and watch it fail. The existing
+"takes profit exactly at target" check had passed for months against a clean
+`70.0` while a real position could not take profit.
+
+A REOPENED item is the most urgent thing on the board: something is on record
+as done while the problem is still live.
+
 ## Conventions
 
 Module docstrings explain **why**, not just what, and record the bug that

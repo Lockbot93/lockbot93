@@ -122,3 +122,25 @@ safe to edit or prune by hand.
 - **2026-08-04 22:34** — 2026-08-05: Confirmed the 08-04 SHORT shadow-logging patch was NEVER applied — shadow log still 119 resolved / 0 SHORT and market_scanner.py stage-1 filter still drops SELL_SHORT at SHORT_EXECUTION_NOT_ENABLED before stage 2; regenerated an improved patch (short_shadow_patch.md, 3 edits: tag shadow_only in stage-1 and advance to stage 2, finalize without trade_approved, extend shadow population to approved+shadow_shorts) and handed it to the user; verify with get_shadow_breakdown(side) after the next session.
 
 - **2026-08-04 22:39** — 2026-08-05: PCG +50% boundary miss ROOT-CAUSED — decide_exit's >= comparison is correct (self-test covers exact-at-target), but net_fill_dollars computes float(price)*100 without rounding, so PCG's entry_debit persisted as 56.00000000000001, making the take-profit target 84.00000000000001; the $84.00 quote failed >= by 1e-14. Patch delivered (pcg_float_debit_patch.md): round(amount, 2) in net_fill_dollars plus rounding on load; until applied, PCG needs $84.01 to trigger. Not a strict-inequality bug — supersedes the 08-04 15:31 hypothesis.
+
+- **2026-08-05 07:00** — User intends to add Telegram user ID 6854250494 to TELEGRAM_ALLOWED_USER_IDS in .env (hand edit + bot restart pending as of 2026-08-05); once done, brain should restart the Telegram process and confirm — and note the new user will hold /flatten authority.
+
+- **2026-08-05 07:12** — 2026-08-05: User directive — act as a trader, not just an operator: every session resolve shadows and re-read the regime split, re-run the three parked rules end of this week (~5-6 days history), recommend blocking STRONG_UPTREND at n≈200 if the gap holds, and bring any rule clearing 30+ backtest trades with positive expectancy to the user with sample size stated plainly.
+
+- **2026-08-05 08:36** — 2026-08-05: User wants a reminder when home between 5:45-6:00pm CT today: (1) give the brain a pipeline to Claude so filed engineer items can be executed automatically, (2) enable day trading and shorts — note shorts are code-blocked (engineer item 46169c86) and disabled under $2,000 equity, and day-trade testing awaits engineer item 4cf2ab9f; surface this in any session near that time.
+
+- **2026-08-05 10:30** — 2026-08-05: Universe funnel diagnosed — universe.py keeps top-N most-liquid $5-50 names, then universe_volatility.py's 1.25-3%/day ATR band cuts that to 50 (survivors are quiet utilities/ETFs, so the band is the binding filter); safe expansion is raising UNIVERSE_TOP_N in lockbot_config.py (hand edit, not runtime-changeable) to feed the same band a deeper pool — do NOT widen the band itself mid-test, it would change the measured population; verify with `python build_universe.py --dry-run --top 600`.
+
+- **2026-08-05 15:31** — FAILURE: The only incident in the 7-day window is the already-recorded cluster of 4 DNS-resolution cycle crashes (07-29/30) to paper-api.alpaca.markets — an environment failure, absorbed correctly by the controller retry loop, no recurrence in 6 days: handled.
+
+- **2026-08-05 15:31** — FAILURE: The Market Scanner session-boundary health-check cluster has now aged out of the 7-day incident window entirely (zero occurrences; 08-05 is the fifth consecutive clean session including open/close boundaries) — it stays recorded as dormant per the 08-04 decision; reopen only if it recurs.
+
+- **2026-08-05 15:31** — OPTIONS_SHADOW_MODE flipped to True between 08-04 and 08-05, so with EQUITY_ENTRIES_ENABLED already False LOCKBOT now submits no new orders on any path — the only live risk is the two open option positions (PCG put $56 debit, IBIT spread $26 debit, $82 combined) whose software exits options_manager still runs every cycle.
+
+- **2026-08-05 15:31** — The PCG float-debit fix is applied and confirmed in state (entry_debit now reads exactly 56.0 via constructor rounding, engineer item 734d2e7a resolved), but PCG remains open at highest_value $84.00 — the exact +50% touch happened before the fix, so realizing the gain now requires the position value to re-reach $84.00.
+
+- **2026-08-05 15:31** — Shadow resolved grew 119→130 with ZERO wins in the marginal 11 (and only 1 win in the 23 resolutions since 08-03); cumulative is 24/130 (18.5%, −0.446R), pushing the Wilson 95% upper bound to ~26% versus the 33.3% breakeven — the strategy's shortfall is deepening, not narrowing.
+
+- **2026-08-05 15:31** — The regime split is now perfectly balanced at n=65 each: STRONG_UPTREND 8/65 (12.3%, −0.63R) vs WEAK_UPTREND 16/65 (24.6%, −0.26R), two-tail p≈0.07 — the closest to significance yet but still short; per the standing plan, hold the STRONG_UPTREND block recommendation until n≈200.
+
+- **2026-08-05 15:31** — The scan universe grew 47→52 symbols without the UNIVERSE_TOP_N hand edit being applied, so the volatility-band survivor count drifts on its own by a few names day to day — still roughly a third of the 150 cap.

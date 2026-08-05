@@ -877,6 +877,7 @@ def build_tools() -> list:
         body: str,
         kind: str = "bug",
         refs: str = "",
+        how_to_verify: str = "",
     ) -> str:
         """Hand work to the person who edits LOCKBOT's code, durably.
 
@@ -895,12 +896,24 @@ def build_tools() -> list:
         the mechanism, and what proves it. Do not file the same thing
         twice -- check engineer_channel in your state first.
 
+        ALWAYS give how_to_verify for a bug. It is the acceptance test
+        the engineer builds against and that YOU will later check, and
+        it is what separates a fix that is correct from one that is
+        merely plausible. Your own PCG diagnosis on 2026-08-04 was right
+        and its proposed fix was incomplete -- it missed a third code
+        path -- so an item that only says what to change is not enough.
+        Say what should be TRUE afterwards, concretely: a command that
+        should pass, a number that should read differently, a file that
+        should no longer contain something.
+
         Args:
             subject: One line. What is wrong.
             body: The diagnosis. File, mechanism, evidence, suggested fix.
             kind: "bug" for something broken, "question" to ask something,
                 "note" for context needing no action.
             refs: Comma-separated filenames this concerns.
+            how_to_verify: The acceptance test. What you will check to
+                confirm the problem is actually gone.
         """
 
         from agent_channel import post
@@ -911,15 +924,70 @@ def build_tools() -> list:
             body,
             kind=kind,
             refs=[r.strip() for r in refs.split(",") if r.strip()],
+            verify=how_to_verify,
         )
 
         if not item_id:
             return "Could not file that. Check the sender and kind."
 
+        missing = ""
+
+        if kind == "bug" and not how_to_verify.strip():
+            missing = (
+                " NOTE: you filed no acceptance test, so nobody can confirm "
+                "the fix worked and it cannot close. File the check you "
+                "would run, as a follow-up note referencing this id."
+            )
+
         return (
-            f"Filed as {item_id}. It stays open until resolved, and it is "
-            "in your state snapshot from now on, so you will know when it "
-            "has been applied."
+            f"Filed as {item_id}. It stays open until YOU verify it. When "
+            "the engineer changes something it will appear in your state "
+            "snapshot under awaiting_your_verification, and you confirm or "
+            f"reject it with verify_fix.{missing}"
+        )
+
+    @beta_tool
+    def verify_fix(item_id: str, confirmed: bool, evidence: str) -> str:
+        """Confirm or reject a fix the engineer made to something you filed.
+
+        This is yours alone. The engineer can change code but cannot
+        decide whether the problem went away -- you reported it, so you
+        check it. An item does not close until you say so.
+
+        Before confirming, actually look. Read the source with
+        read_project_file, check the data, run the acceptance test you
+        filed. Do not confirm because the change sounds right.
+
+        REJECT if it is not fixed, or only partly fixed. That reopens the
+        item with your reason attached, which is the correct and cheap
+        outcome -- far cheaper than a bug recorded as done while it is
+        still live. Your PCG fix on 2026-08-04 was incomplete in exactly
+        this way and nothing existed to catch it.
+
+        Args:
+            item_id: The id from your state snapshot.
+            confirmed: True only if you have checked and it is fixed.
+            evidence: What you actually observed. If rejecting, what is
+                still wrong and where.
+        """
+
+        from agent_channel import verify
+
+        if not str(evidence or "").strip():
+            return (
+                "Give the evidence. A verdict with nothing observed behind "
+                "it is the failure this loop exists to prevent."
+            )
+
+        ok = verify(item_id, "lockbot", bool(confirmed), evidence)
+
+        if not ok:
+            return f"No item with id {item_id}. Check your state snapshot."
+
+        return (
+            f"Confirmed {item_id} as fixed." if confirmed
+            else f"Reopened {item_id}. It is back on the engineer's list "
+                 "with your reason attached."
         )
 
     @beta_tool
@@ -939,6 +1007,7 @@ def build_tools() -> list:
         conditions_json: str,
         trend: str = "ANY",
         side: str = "BUY_LONG",
+        horizon: str = "day",
     ) -> str:
         """PROPOSE AND BACKTEST an entry rule. Places no orders.
 
@@ -962,12 +1031,20 @@ def build_tools() -> list:
         Be honest in the rationale. A rule you cannot state a reason for
         is a curve fit, and the validator rejects proposals without one.
 
+        HOLDING WINDOW. "day" holds at most one session and stops at 2%.
+        "swing" holds up to a trading week and stops at 5% -- the stop
+        widens with the window deliberately, because a 2% stop given a
+        week is touched by almost anything and would measure noise
+        rather than the rule. The same rule at both horizons is two
+        experiments and the scorecard reports them separately.
+
         Args:
             name: Short name for the rule.
             rationale: Why this might work. Required.
             conditions_json: JSON list of condition objects.
             trend: BULLISH, BEARISH or ANY.
             side: BUY_LONG or SELL_SHORT.
+            horizon: "day" or "swing".
         """
 
         import json as _json
@@ -993,20 +1070,31 @@ def build_tools() -> list:
             strategy_lab.record_proposal(spec, None, "REJECTED")
             return f"REJECTED: {why}"
 
+        if horizon not in strategy_lab.HORIZONS:
+            return (f"horizon must be one of "
+                    f"{sorted(strategy_lab.HORIZONS)}.")
+
         try:
             import backtest
             import lockbot_config as _cfg
             from universe import load_universe
 
             symbols = load_universe(_cfg.UNIVERSE_FILE)
-            frames = backtest.load_history(symbols, days=5)
+
+            # Depth comes from the horizon. This was 5 days, hardcoded,
+            # which is why every proposal on 2026-08-04 returned TOO FEW
+            # TRADES on 8-10 trades -- and would have made a swing test
+            # structurally impossible, since one trade can span the
+            # whole sample.
+            days = strategy_lab.HORIZONS[horizon]["history_days"]
+            frames = backtest.load_history(symbols, days=days)
         except Exception as error:
             return f"Could not load history: {type(error).__name__}: {error}"
 
         if not frames:
             return "No usable history; cannot judge the proposal."
 
-        verdict, result = strategy_lab.evaluate(spec, frames)
+        verdict, result = strategy_lab.evaluate(spec, frames, horizon=horizon)
         strategy_lab.record_proposal(spec, result, verdict)
 
         return (
@@ -1247,6 +1335,7 @@ def build_tools() -> list:
         read_project_file,
         remember,
         file_for_engineer,
+        verify_fix,
         propose_strategy,
         strategy_scorecard,
         recommend_change,

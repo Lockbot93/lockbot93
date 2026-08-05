@@ -64,6 +64,65 @@ TRENDS = {"BULLISH", "BEARISH", "ANY"}
 
 MAX_CONDITIONS = 6
 
+# How long a proposal is allowed to be held, in 5-minute bars.
+#
+# Filed by LOCKBOT itself on 2026-08-05 (agent_channel 4cf2ab9f): every
+# proposal was scored at max_bars_held=78, hardcoded, so a rule could
+# only ever be tested as a day trade. The machinery for longer holds
+# already existed in backtest.run_rules; nothing exposed it.
+#
+# THE STOP MOVES WITH THE HORIZON, AND IT HAS TO.
+#
+# A 2% stop is a real constraint over one session and a formality over
+# five: given a week, an ordinary name in this universe (1.25-3.00%
+# daily movement) will touch 2% in either direction almost surely, so a
+# "swing" test at a 2% stop measures how long a coin takes to land, not
+# whether the rule works. Widening the stop with the window is what
+# keeps the two horizons comparable rather than rigged.
+#
+# Both remain overridable; these are the defaults that make each
+# horizon mean something on its own terms.
+HORIZONS = {
+    # One session. 78 five-minute bars is 6.5 hours, so a position
+    # cannot survive the close -- which is what makes it a day trade.
+    "day": {"max_bars_held": 78, "stop_percent": 0.02,
+            "history_days": 90},
+    # One trading week.
+    "swing": {"max_bars_held": 390, "stop_percent": 0.05,
+              "history_days": 365},
+}
+
+# history_days is here because the horizon decides how much past you
+# need, and getting it wrong is silent.
+#
+# The propose_strategy tool loaded 5 days of bars, hardcoded. Every
+# proposal LOCKBOT made on 2026-08-04 came back TOO FEW TRADES with 8-10
+# trades each, and it correctly concluded that "the binding constraint
+# on rule discovery is history depth, not rule design" -- while the
+# depth was a constant nobody had looked at. 180 days of 5-minute bars
+# are available on this feed; a search over 40 symbols and 123 sessions
+# was run on 2026-08-04 to confirm it.
+#
+# A swing test is worse than useless on 5 days: one trade can consume
+# the entire sample, so the harness reports TOO FEW TRADES forever and
+# reads as "no edge" rather than "no data".
+#
+# The swing depth is 365 rather than 180 because 180 was measured and
+# found short. What matters is how many NON-OVERLAPPING holds fit, since
+# trades from the same week across different symbols move together and
+# are closer to one observation than to many:
+#
+#     180d  123 sessions  ->  25 holds per symbol
+#     365d  251 sessions  ->  50
+#     540d  370 sessions  ->  74
+#
+# 25 is too few to survive the day-concentration test this project
+# already applies elsewhere. The self-test asserts the ratio rather than
+# the constant, so shortening the history without lengthening the window
+# fails loudly instead of quietly producing thin results.
+
+DEFAULT_HORIZON = "day"
+
 
 def validate_spec(spec: dict) -> tuple[bool, str]:
     """Whether a proposal is well-formed and safe to compile."""
@@ -245,6 +304,13 @@ def record_proposal(spec: dict, result: dict | None, verdict: str) -> None:
         "rationale": spec.get("rationale"),
         "spec": spec,
         "verdict": verdict,
+        # Recorded at the top level, not only inside `result`, so the
+        # scorecard can group by it without digging. Rules can now be
+        # tested at more than one holding window, and a scorecard that
+        # pools day trades with swing trades reports one number for two
+        # different experiments -- and inflates its own denominator,
+        # which is the one thing that scorecard exists to keep honest.
+        "horizon": (result or {}).get("horizon", DEFAULT_HORIZON),
         "result": result or {},
     }
 
@@ -306,16 +372,56 @@ def generator_scorecard() -> str:
             f"{len(rows) * 0.05:.1f} would by chance alone."
         )
 
+    # Split by holding window. The same rule tested at two horizons is
+    # two experiments, and pooling them hides which one the result came
+    # from -- a rule that works as a swing trade and fails as a day
+    # trade reads as one mediocre rule when pooled.
+    by_horizon: dict[str, dict[str, int]] = {}
+
+    for row in rows:
+        horizon = row.get("horizon") or row.get("result", {}).get(
+            "horizon", DEFAULT_HORIZON)
+        bucket = by_horizon.setdefault(str(horizon), {})
+        bucket[row["verdict"]] = bucket.get(row["verdict"], 0) + 1
+
+    if len(by_horizon) > 1:
+        lines.append("")
+        lines.append("By holding window:")
+
+        for horizon in sorted(by_horizon):
+            counts = by_horizon[horizon]
+            total = sum(counts.values())
+            good = counts.get("PROMISING", 0)
+            lines.append(f"  {horizon:<10} {total:>3} proposal(s), "
+                         f"{good} promising")
+    elif by_horizon:
+        only = next(iter(by_horizon))
+        lines.append("")
+        lines.append(
+            f"  Every proposal was scored at the '{only}' horizon. Rules "
+            "have not been compared across holding windows."
+        )
+
     return "\n".join(lines)
 
 
 def evaluate(spec: dict, frames: dict, *, reward_ratio: float = 2.0,
-             stop_percent: float = 0.02) -> tuple[str, dict]:
+             stop_percent: float | None = None,
+             horizon: str = DEFAULT_HORIZON) -> tuple[str, dict]:
     """Backtest one proposal. Returns (verdict, result).
 
     Verdicts are deliberately cautious. "PROMISING" means it cleared
     breakeven on the sample available, not that it works — the sample is
     days long and the harness says so itself.
+
+    `horizon` picks the holding window and its matching stop from
+    HORIZONS. An explicit `stop_percent` overrides the horizon's default,
+    which is occasionally what you want and usually not — see the note on
+    HORIZONS about why the two move together.
+
+    The horizon is returned in the payload and recorded with the
+    proposal, because a scorecard that mixes day and swing results is
+    comparing different experiments and counting them as one.
     """
 
     import backtest
@@ -325,13 +431,22 @@ def evaluate(spec: dict, frames: dict, *, reward_ratio: float = 2.0,
     if not ok:
         return "REJECTED", {"reason": why}
 
+    if horizon not in HORIZONS:
+        return "REJECTED", {
+            "reason": f"horizon must be one of {sorted(HORIZONS)}."
+        }
+
+    settings = HORIZONS[horizon]
+    max_bars = settings["max_bars_held"]
+    stop = settings["stop_percent"] if stop_percent is None else stop_percent
+
     rule = compile_spec(spec)
 
     results = backtest.run_rules(
         frames, {spec["name"]: rule},
-        stop_percent=stop_percent,
+        stop_percent=stop,
         reward_ratio=reward_ratio,
-        max_bars_held=78,
+        max_bars_held=max_bars,
     )
 
     result = results[0]
@@ -339,6 +454,9 @@ def evaluate(spec: dict, frames: dict, *, reward_ratio: float = 2.0,
     days, concentration = backtest.concentration(result)
 
     payload = {
+        "horizon": horizon,
+        "max_bars_held": max_bars,
+        "stop_percent": stop,
         "trades": len(decided),
         "days": days,
         "busiest_share": round(concentration, 3),
@@ -357,6 +475,105 @@ def evaluate(spec: dict, frames: dict, *, reward_ratio: float = 2.0,
         return "PROMISING", payload
 
     return "NEGATIVE", payload
+
+
+def _horizon_self_test(check) -> None:
+    """Holding windows, filed by LOCKBOT as agent_channel item 4cf2ab9f."""
+
+    print()
+    print("Holding windows")
+
+    check("more than one horizon exists", len(HORIZONS) >= 2,
+          str(sorted(HORIZONS)))
+    check("the default is a real horizon", DEFAULT_HORIZON in HORIZONS)
+
+    day, swing = HORIZONS["day"], HORIZONS["swing"]
+
+    check("a day trade cannot survive the session",
+          day["max_bars_held"] <= 78, str(day["max_bars_held"]))
+    check("a swing trade can hold for days",
+          swing["max_bars_held"] > day["max_bars_held"] * 3,
+          str(swing["max_bars_held"]))
+
+    # The point of the whole change: the stop has to widen with the
+    # window or the longer horizon just measures noise.
+    check("the stop widens with the window",
+          swing["stop_percent"] > day["stop_percent"],
+          f"{day['stop_percent']} vs {swing['stop_percent']}")
+
+    check("and so does the history required",
+          swing["history_days"] > day["history_days"],
+          f"{day['history_days']} vs {swing['history_days']}")
+
+    # 5 days was the old hardcoded depth and it starved every proposal.
+    check("no horizon is starved of history",
+          all(h["history_days"] >= 30 for h in HORIZONS.values()))
+
+    # A swing trade must fit in its own sample many times over, or
+    # TOO FEW TRADES reads as "no edge" when it means "no data".
+    for name, settings in HORIZONS.items():
+        sessions = settings["history_days"] * 5 / 7   # calendar -> trading
+        holds = sessions * 78 / settings["max_bars_held"]
+        check(f"the {name} window fits its history many times over",
+              holds >= 40, f"{holds:.0f} non-overlapping holds")
+
+    check("an unknown horizon is refused",
+          evaluate({"name": "x", "rationale": "y",
+                    "conditions": [{"left": "rsi", "op": ">", "right": 50}]},
+                   {}, horizon="fortnight")[0] == "REJECTED")
+
+
+def _scorecard_self_test(check) -> None:
+    """A scorecard that pools horizons is reporting two experiments as one."""
+
+    print()
+    print("The scorecard keeps horizons apart")
+
+    global PROPOSALS_FILE
+    import tempfile
+
+    real = PROPOSALS_FILE
+    PROPOSALS_FILE = Path(tempfile.mkdtemp()) / "strategy_proposals.jsonl"
+
+    try:
+        spec = {"name": "r", "rationale": "why",
+                "conditions": [{"left": "rsi", "op": ">", "right": 50}]}
+
+        record_proposal(spec, {"horizon": "day", "trades": 40}, "NEGATIVE")
+        record_proposal(spec, {"horizon": "day", "trades": 40}, "NEGATIVE")
+        record_proposal(spec, {"horizon": "swing", "trades": 40}, "PROMISING")
+
+        rows = load_proposals()
+        check("the horizon is stored at the top level",
+              all("horizon" in r for r in rows))
+
+        text = generator_scorecard()
+        check("both horizons are reported", "day" in text and "swing" in text,
+              text)
+        check("and separately", "By holding window" in text, text)
+
+        PROPOSALS_FILE.unlink()
+        record_proposal(spec, {"horizon": "day", "trades": 40}, "NEGATIVE")
+        text = generator_scorecard()
+        check("a single-horizon scorecard says so rather than implying breadth",
+              "have not been compared" in text, text)
+
+        # An old row written before horizons existed must not vanish or
+        # crash the scorecard.
+        with PROPOSALS_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "at": "2026-08-01T00:00:00+00:00", "name": "old",
+                "rationale": "r", "spec": spec, "verdict": "NEGATIVE",
+                "result": {},
+            }) + "\n")
+
+        check("a pre-horizon proposal still counts",
+              len(load_proposals()) == 2)
+        check("and the scorecard still renders",
+              "Proposals made: 2" in generator_scorecard())
+
+    finally:
+        PROPOSALS_FILE = real
 
 
 def _self_test() -> int:
@@ -492,6 +709,9 @@ def _self_test() -> int:
 
     finally:
         PROPOSALS_FILE = real
+
+    _horizon_self_test(check)
+    _scorecard_self_test(check)
 
     print()
 

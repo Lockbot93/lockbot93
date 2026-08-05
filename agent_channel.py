@@ -84,6 +84,27 @@ KINDS = {
 # done; a bug is not.
 ACTIONABLE = {"bug", "question"}
 
+# The lifecycle, and why it is not just open/closed.
+#
+# Filing a bug and applying a patch are different from FIXING it. LOCKBOT
+# diagnosed the PCG float bug correctly on 2026-08-04 and proposed a fix
+# that was genuinely incomplete: it patched the two paths it knew about
+# and missed options_scanner.py, which mints the same dirty number for
+# every new position. Had that patch been applied and the item closed,
+# the bug would have been marked fixed while still live.
+#
+# So "the engineer applied something" cannot be the end state. The side
+# that reported the problem is the side that can see whether it went
+# away, and it gets the last word.
+OPEN = "open"                  # filed, nobody has done anything
+APPLIED = "applied"            # a change was made, not yet confirmed
+VERIFIED = "verified"          # the reporter confirmed it is actually fixed
+REOPENED = "reopened"          # the reporter checked and it is NOT fixed
+RESOLVED = "resolved"          # closed without verification (notes, questions)
+
+# Statuses that still need someone to act.
+UNFINISHED = {OPEN, APPLIED, REOPENED}
+
 MAX_SCAN_LINES = 5000
 
 
@@ -98,9 +119,16 @@ def post(
     *,
     kind: str = "note",
     refs: list[str] | None = None,
+    verify: str = "",
     path: Path | None = None,
 ) -> str:
     """File one item. Returns its id.
+
+    `verify` is the acceptance test: what someone should check to know
+    the problem is actually gone. It is the difference between an item
+    that can be implemented correctly and one that can only be
+    implemented plausibly. An item without it can still be applied, but
+    nobody can confirm it, so it will sit in APPLIED rather than close.
 
     Never raises on a write failure. This is called from LOCKBOT's tool
     path and from the exit engine's neighbourhood; a channel that can
@@ -125,6 +153,7 @@ def post(
         "kind": kind,
         "subject": str(subject or "").strip()[:200],
         "body": str(body or "").strip()[:8000],
+        "verify": str(verify or "").strip()[:2000],
         "refs": [str(r)[:120] for r in (refs or [])][:12],
     }
 
@@ -137,14 +166,15 @@ def post(
     return item_id
 
 
-def resolve(
+def _event(
     item_id: str,
+    event: str,
     by: str,
     note: str = "",
     *,
     path: Path | None = None,
 ) -> bool:
-    """Mark an item done. Appended, never overwritten."""
+    """Append one lifecycle event against an item."""
 
     by = str(by or "").strip().lower()
 
@@ -155,7 +185,8 @@ def resolve(
         return False
 
     record = {
-        "resolves": str(item_id),
+        "event": event,
+        "item": str(item_id),
         "at": _now(),
         "by": by,
         "note": str(note or "").strip()[:2000],
@@ -168,6 +199,64 @@ def resolve(
         return False
 
     return True
+
+
+def mark_applied(
+    item_id: str, by: str = "agent", note: str = "", *, path: Path | None = None
+) -> bool:
+    """Record that a change was made. This does NOT close the item.
+
+    The reporter still has to confirm the problem went away. Applying a
+    patch and fixing a bug are different things, and on 2026-08-04 they
+    came apart: a correct diagnosis carried an incomplete fix, and
+    closing on "applied" would have marked a live bug done.
+    """
+
+    return _event(item_id, "applied", by, note, path=path)
+
+
+def verify(
+    item_id: str,
+    by: str,
+    confirmed: bool,
+    evidence: str = "",
+    *,
+    path: Path | None = None,
+) -> bool:
+    """The reporter's verdict on whether the problem is actually gone.
+
+    `confirmed` False REOPENS the item rather than closing it, and the
+    evidence says what is still wrong. That is the whole loop: an item
+    only leaves the board when the side that found the problem agrees it
+    is no longer there.
+    """
+
+    return _event(
+        item_id,
+        "verified" if confirmed else "rejected",
+        by,
+        evidence,
+        path=path,
+    )
+
+
+def resolve(
+    item_id: str,
+    by: str,
+    note: str = "",
+    *,
+    path: Path | None = None,
+) -> bool:
+    """Close an item outright, without a verification round.
+
+    For notes and questions, and for bugs where verification is not
+    meaningful. A bug that CAN be verified should go through
+    mark_applied and verify instead, so the fix is confirmed by the side
+    that found the problem rather than asserted by the side that changed
+    the code.
+    """
+
+    return _event(item_id, "resolved", by, note, path=path)
 
 
 def _records(path: Path | None = None) -> list[dict]:
@@ -202,28 +291,56 @@ def _records(path: Path | None = None) -> list[dict]:
     return out
 
 
+_EVENT_STATUS = {
+    "applied": APPLIED,
+    "verified": VERIFIED,
+    "rejected": REOPENED,
+    "resolved": RESOLVED,
+}
+
+
 def items(*, path: Path | None = None) -> list[dict]:
-    """Every item, oldest first, each carrying its resolution state."""
+    """Every item, oldest first, each carrying its status and history.
+
+    Status comes from the LAST event, so a rejected fix genuinely
+    reopens: apply, reject, apply again, verify is a normal life and the
+    item is only closed at the end of it.
+    """
 
     records = _records(path)
 
-    resolutions: dict[str, dict] = {}
+    history: dict[str, list[dict]] = {}
 
     for record in records:
-        if record.get("resolves"):
-            resolutions[str(record["resolves"])] = record
+        # "resolves" is the pre-2026-08-05 shape, kept readable so the
+        # first items filed do not lose their state.
+        target = record.get("item") or record.get("resolves")
+
+        if target:
+            entry = dict(record)
+            entry.setdefault("event", "resolved")
+            history.setdefault(str(target), []).append(entry)
 
     out = []
 
     for record in records:
-        if record.get("resolves") or not record.get("id"):
+        if not record.get("id") or record.get("item") or record.get("resolves"):
             continue
 
         entry = dict(record)
-        resolution = resolutions.get(str(record["id"]))
+        events = history.get(str(record["id"]), [])
+        last = events[-1] if events else None
 
-        entry["resolved"] = resolution is not None
-        entry["resolution"] = resolution
+        entry["events"] = events
+        entry["status"] = (
+            _EVENT_STATUS.get(str(last.get("event")), RESOLVED)
+            if last else OPEN
+        )
+        entry["closed"] = entry["status"] in (VERIFIED, RESOLVED)
+
+        # Kept for callers written against the original shape.
+        entry["resolved"] = entry["closed"]
+        entry["resolution"] = last if entry["closed"] else None
 
         out.append(entry)
 
@@ -231,19 +348,33 @@ def items(*, path: Path | None = None) -> list[dict]:
 
 
 def open_items(*, sender: str | None = None, path: Path | None = None) -> list[dict]:
-    """Unresolved, actionable items. Optionally only from one side.
+    """Actionable items that are not finished. Optionally from one side.
 
-    `sender` filters by who RAISED it, which is how each side finds work
-    waiting on them: the engineer reads what LOCKBOT raised.
+    Includes APPLIED and REOPENED, not just untouched ones: a fix
+    awaiting confirmation is not done, and a rejected one is emphatically
+    not done.
     """
 
     out = [
         i for i in items(path=path)
-        if i["kind"] in ACTIONABLE and not i["resolved"]
+        if i["kind"] in ACTIONABLE and i["status"] in UNFINISHED
     ]
 
     if sender:
         out = [i for i in out if i["sender"] == str(sender).strip().lower()]
+
+    return out
+
+
+def awaiting_verification(
+    *, reporter: str | None = None, path: Path | None = None
+) -> list[dict]:
+    """Items where a change was made and nobody has confirmed it worked."""
+
+    out = [i for i in items(path=path) if i["status"] == APPLIED]
+
+    if reporter:
+        out = [i for i in out if i["sender"] == str(reporter).strip().lower()]
 
     return out
 
@@ -265,25 +396,46 @@ def brief_for_lockbot(*, path: Path | None = None) -> dict[str, Any]:
 
     everything = items(path=path)
 
+    def last_note(item: dict) -> str:
+        return item["events"][-1].get("note", "")[:600] if item["events"] else ""
+
     return {
         "what_this_is": (
             "Messages between you and the engineer who edits your code. "
-            "You cannot change code; file a 'bug' here and it will be "
-            "picked up. Items stay open until resolved."
+            "You cannot change code; file a 'bug' with file_for_engineer "
+            "and it will be picked up."
         ),
+        "YOUR_JOB_HERE": (
+            "When an item you raised shows status 'applied', the engineer "
+            "has changed something and it is YOUR turn: check whether the "
+            "problem is actually gone, using the acceptance test in "
+            "'verify'. Read the source with read_project_file and the data "
+            "with the other tools. Then call verify_fix. Confirm only if "
+            "you can see it is fixed -- rejecting reopens the item, which "
+            "is the correct outcome when a fix is incomplete, and is "
+            "cheaper than a bug marked done while still live."
+        ),
+        "awaiting_your_verification": [
+            {"id": i["id"], "subject": i["subject"],
+             "how_to_verify": i["verify"] or "(no acceptance test was filed)",
+             "what_the_engineer_did": last_note(i),
+             "refs": i.get("refs", [])}
+            for i in everything
+            if i["sender"] == "lockbot" and i["status"] == APPLIED
+        ],
         "open_items_you_raised": [
             {"id": i["id"], "at": i["at"], "kind": i["kind"],
-             "subject": i["subject"]}
+             "status": i["status"], "subject": i["subject"]}
             for i in everything
             if i["sender"] == "lockbot" and i["kind"] in ACTIONABLE
-            and not i["resolved"]
+            and i["status"] in UNFINISHED
         ],
         "waiting_on_you": [
             {"id": i["id"], "at": i["at"], "subject": i["subject"],
              "body": i["body"][:600]}
             for i in everything
             if i["sender"] == "agent" and i["kind"] in ACTIONABLE
-            and not i["resolved"]
+            and i["status"] in UNFINISHED
         ],
         "recently_done_by_the_engineer": [
             {"id": i["id"], "at": i["at"], "subject": i["subject"],
@@ -291,12 +443,11 @@ def brief_for_lockbot(*, path: Path | None = None) -> dict[str, Any]:
             for i in everything
             if i["sender"] == "agent" and i["kind"] == "fix"
         ][-8:],
-        "your_items_now_resolved": [
+        "your_items_now_verified": [
             {"id": i["id"], "subject": i["subject"],
-             "resolved_by": i["resolution"].get("by"),
-             "note": i["resolution"].get("note", "")[:400]}
+             "note": last_note(i)}
             for i in everything
-            if i["sender"] == "lockbot" and i["resolved"]
+            if i["sender"] == "lockbot" and i["status"] == VERIFIED
         ][-8:],
     }
 
@@ -308,57 +459,81 @@ def brief_for_agent(*, path: Path | None = None) -> str:
     waiting = [
         i for i in everything
         if i["sender"] == "lockbot" and i["kind"] in ACTIONABLE
-        and not i["resolved"]
+        and i["status"] in UNFINISHED
     ]
-    questions = [i for i in waiting if i["kind"] == "question"]
-    bugs = [i for i in waiting if i["kind"] == "bug"]
 
     if not everything:
         return (
-            "Nothing in the channel yet.\n\n"
-            "LOCKBOT files items here with the file_for_engineer tool; "
-            "post back with agent_channel.post('agent', ...) and resolve "
-            "with agent_channel.resolve(id, 'agent', note)."
+            "Channel empty. Nothing filed by either side.\n\n"
+            "LOCKBOT files items with its file_for_engineer tool. You post "
+            "with agent_channel.post('agent', ...), record a change with "
+            "mark_applied(id), and LOCKBOT confirms it with verify_fix."
         )
 
+    reopened = [i for i in waiting if i["status"] == REOPENED]
+    applied = [i for i in waiting if i["status"] == APPLIED]
+    fresh = [i for i in waiting if i["status"] == OPEN]
+
     lines = [
-        "=" * 68,
-        "FROM LOCKBOT",
-        "=" * 68,
-        f"  {len(bugs)} open bug(s), {len(questions)} open question(s), "
-        f"{len(everything)} item(s) total",
+        "=" * 70,
+        "AGENT CHANNEL — items LOCKBOT is waiting on",
+        "=" * 70,
+        f"  {len(fresh)} open, {len(reopened)} REOPENED (a fix did not "
+        f"work), {len(applied)} awaiting LOCKBOT's verification",
         "",
     ]
 
     if not waiting:
-        lines.append("  Nothing open. ")
-    else:
-        for item in waiting:
-            lines.append(f"  [{item['id']}] {item['kind'].upper()}: "
-                         f"{item['subject']}")
-            lines.append(f"      filed {item['at']}")
+        lines.append("  Nothing outstanding.")
+        lines.append("")
 
-            for line in item["body"].splitlines()[:14]:
-                lines.append(f"      {line}")
+    # Rejected first. A fix that was applied and found wanting is more
+    # urgent than an untouched item, because something is on record as
+    # done while the problem is still live.
+    for item in reopened + fresh:
+        flag = " *** REOPENED — a previous fix did not work ***" \
+            if item["status"] == REOPENED else ""
 
-            if item.get("refs"):
-                lines.append(f"      refs: {', '.join(item['refs'])}")
+        lines.append(f"  [{item['id']}] {item['kind'].upper()}: "
+                     f"{item['subject']}{flag}")
+        lines.append(f"      filed {item['at'][:16]} by {item['sender']}")
 
-            lines.append("")
+        for line in item["body"].splitlines()[:16]:
+            lines.append(f"      {line}")
 
-    recent_fixes = [i for i in everything if i["kind"] == "fix"][-5:]
+        if item.get("verify"):
+            lines.append("      ACCEPTANCE TEST (LOCKBOT will check this):")
 
-    if recent_fixes:
-        lines.append("-" * 68)
-        lines.append("RECENT FIXES ON RECORD")
-        lines.append("-" * 68)
+            for line in item["verify"].splitlines()[:8]:
+                lines.append(f"        {line}")
 
-        for item in recent_fixes:
-            lines.append(f"  [{item['id']}] {item['at'][:16]}  {item['subject']}")
+        if item.get("refs"):
+            lines.append(f"      refs: {', '.join(item['refs'])}")
 
-    lines.append("")
-    lines.append("Resolve with: "
-                 "python agent_channel.py --resolve <id> --note \"...\"")
+        for event in item["events"]:
+            if event.get("event") == "rejected":
+                lines.append(f"      REJECTED {event.get('at','')[:16]}: "
+                             f"{event.get('note','')[:400]}")
+
+        lines.append("")
+
+    if applied:
+        lines.append("-" * 70)
+        lines.append("APPLIED, AWAITING LOCKBOT'S VERIFICATION")
+        lines.append("-" * 70)
+
+        for item in applied:
+            lines.append(f"  [{item['id']}] {item['subject']}")
+
+        lines.append("")
+
+    lines.append("-" * 70)
+    lines.append("  Record a change:  python agent_channel.py "
+                 "--applied <id> --note \"what you did\"")
+    lines.append("  Close outright :  python agent_channel.py "
+                 "--resolve <id> --note \"...\"")
+    lines.append("  LOCKBOT confirms with its verify_fix tool. An item is "
+                 "only done when it does.")
 
     return "\n".join(lines)
 
@@ -403,26 +578,93 @@ def _self_test() -> int:
           all(i["kind"] != "note" for i in open_items(path=log)))
 
     print()
-    print("Resolution is what makes this more than a suggestion box")
+    print("Applying is not fixing")
 
-    check("resolving an unknown id fails",
-          resolve("nope", "agent", path=log) is False)
-    check("resolving needs a real sender",
-          resolve(bug_id, "hacker", path=log) is False)
+    check("an unknown id cannot be marked applied",
+          mark_applied("nope", "agent", path=log) is False)
+    check("marking applied needs a real sender",
+          mark_applied(bug_id, "hacker", path=log) is False)
 
-    check("the bug resolves", resolve(bug_id, "agent", "rounded in the "
-                                      "constructor", path=log) is True)
-    check("and is no longer open", open_items(path=log) == [])
+    check("the engineer records a change",
+          mark_applied(bug_id, "agent", "rounded in the constructor",
+                       path=log) is True)
 
-    resolved = [i for i in items(path=log) if i["id"] == bug_id][0]
-    check("the item records who resolved it",
-          resolved["resolution"]["by"] == "agent")
-    check("and why", "constructor" in resolved["resolution"]["note"])
+    state = lambda: [i for i in items(path=log) if i["id"] == bug_id][0]
 
-    # The original item text must survive resolution: an append-only log
-    # is the point, so history is not rewritten.
+    check("the item is APPLIED, not closed", state()["status"] == "applied",
+          state()["status"])
+    check("and is NOT closed", state()["closed"] is False)
+    check("so it still counts as outstanding",
+          any(i["id"] == bug_id for i in open_items(path=log)))
+    check("and shows up as awaiting verification",
+          any(i["id"] == bug_id for i in awaiting_verification(path=log)))
+
+    print()
+    print("The reporter gets the last word")
+
+    # This is the case the whole lifecycle exists for: a fix that was
+    # applied in good faith and did not actually work.
+    check("the reporter can reject it",
+          verify(bug_id, "lockbot", False,
+                 "options_scanner.py still mints a dirty debit", path=log)
+          is True)
+    check("which REOPENS rather than closes", state()["status"] == "reopened",
+          state()["status"])
+    check("it is not closed", state()["closed"] is False)
+    check("it is back on the engineer's list",
+          any(i["id"] == bug_id for i in open_items(path=log)))
+    check("and no longer awaiting verification",
+          awaiting_verification(path=log) == [])
+    check("the rejection reason is on the record",
+          any("options_scanner" in e.get("note", "")
+              for e in state()["events"]))
+
+    mark_applied(bug_id, "agent", "moved rounding into __post_init__",
+                 path=log)
+    check("a second fix moves it back to applied",
+          state()["status"] == "applied")
+
+    check("and this time it verifies",
+          verify(bug_id, "lockbot", True, "84.0 >= 84.0 is now True",
+                 path=log) is True)
+    check("which finally closes it", state()["status"] == "verified")
+    check("closed means closed", state()["closed"] is True)
+    check("nothing is outstanding", open_items(path=log) == [])
+
+    check("the full history survives", len(state()["events"]) == 4,
+          str([e.get("event") for e in state()["events"]]))
+
+    # The original text must survive every round: append-only is the
+    # point, so history is never rewritten.
     check("the original body is untouched",
-          "56.00000000000001" in resolved["body"])
+          "56.00000000000001" in state()["body"])
+
+    print()
+    print("An acceptance test is what makes a fix checkable")
+
+    with_test = post("lockbot", "needs checking", "body",
+                     kind="bug",
+                     verify="run options_manager.py --self-test", path=log)
+    mark_applied(with_test, "agent", "done", path=log)
+    view = brief_for_lockbot(path=log)
+
+    check("the acceptance test reaches lockbot",
+          any("--self-test" in i["how_to_verify"]
+              for i in view["awaiting_your_verification"]),
+          str(view["awaiting_your_verification"]))
+    check("along with what the engineer did",
+          any("done" in i["what_the_engineer_did"]
+              for i in view["awaiting_your_verification"]))
+
+    no_test = post("lockbot", "no test", "body", kind="bug", path=log)
+    mark_applied(no_test, "agent", path=log)
+    view = brief_for_lockbot(path=log)
+    check("a missing acceptance test says so rather than looking verified",
+          any("no acceptance test" in i["how_to_verify"]
+              for i in view["awaiting_your_verification"]))
+
+    resolve(with_test, "agent", path=log)
+    resolve(no_test, "agent", path=log)
 
     print()
     print("Each side sees what is waiting on it")
@@ -433,12 +675,14 @@ def _self_test() -> int:
 
     check("lockbot sees the engineer's open question",
           any(i["id"] == q_id for i in lockbot_view["waiting_on_you"]))
-    check("lockbot sees its own resolved item",
-          any(i["id"] == bug_id for i in lockbot_view["your_items_now_resolved"]))
-    check("and the resolution note comes with it",
-          "constructor" in lockbot_view["your_items_now_resolved"][0]["note"])
+    check("lockbot sees its own verified item",
+          any(i["id"] == bug_id for i in lockbot_view["your_items_now_verified"]))
+    check("and the confirming evidence comes with it",
+          "84.0" in lockbot_view["your_items_now_verified"][0]["note"])
     check("lockbot has no open items of its own now",
           lockbot_view["open_items_you_raised"] == [])
+    check("lockbot is told verification is its job",
+          "verify_fix" in lockbot_view["YOUR_JOB_HERE"])
 
     post("agent", "Rounded entry_debit", "constructor now rounds",
          kind="fix", path=log)
@@ -448,9 +692,22 @@ def _self_test() -> int:
               for i in lockbot_view["recently_done_by_the_engineer"]))
 
     text = brief_for_agent(path=log)
-    check("the engineer brief renders", "FROM LOCKBOT" in text)
-    check("and mentions the open question is not theirs to answer",
-          "0 open bug" in text, text[:200])
+    check("the engineer brief renders", "AGENT CHANNEL" in text, text[:120])
+    check("and tells the engineer how to record a change",
+          "--applied" in text)
+    check("and that lockbot has the last word",
+          "only done when it does" in text)
+
+    # A reopened item must be impossible to miss in the brief: something
+    # is on record as fixed while the problem is still live.
+    loud = post("lockbot", "still broken", "body", kind="bug", path=log)
+    mark_applied(loud, "agent", path=log)
+    verify(loud, "lockbot", False, "no it is not", path=log)
+    text = brief_for_agent(path=log)
+    check("a reopened item is flagged loudly", "REOPENED" in text)
+    check("and its rejection reason is shown",
+          "no it is not" in text, text[:400])
+    resolve(loud, "agent", path=log)
 
     print()
     print("Nothing here may break a caller")
@@ -462,8 +719,10 @@ def _self_test() -> int:
 
     missing = Path(tempfile.mkdtemp()) / "missing.jsonl"
     check("a missing log is empty", items(path=missing) == [])
-    check("and briefs still render", "Nothing in the channel"
+    check("and briefs still render", "Channel empty"
           in brief_for_agent(path=missing))
+    check("and the lockbot brief too",
+          brief_for_lockbot(path=missing)["open_items_you_raised"] == [])
 
     unwritable = Path(tempfile.mkdtemp()) / "no" / "such" / "dir" / "x.jsonl"
     check("an unwritable path returns empty, not an exception",
@@ -488,8 +747,13 @@ def main() -> int:
                         help="file an item as the engineer")
     parser.add_argument("--body", default="", help="item body")
     parser.add_argument("--kind", default="note", choices=sorted(KINDS))
-    parser.add_argument("--resolve", metavar="ID", help="mark an item done")
-    parser.add_argument("--note", default="", help="resolution note")
+    parser.add_argument("--verify-test", default="",
+                        help="acceptance test to file with --post")
+    parser.add_argument("--applied", metavar="ID",
+                        help="record a change; LOCKBOT still has to confirm it")
+    parser.add_argument("--resolve", metavar="ID",
+                        help="close an item outright, no verification round")
+    parser.add_argument("--note", default="", help="note for the event")
     parser.add_argument("--all", action="store_true", help="show every item")
     parser.add_argument("--self-test", action="store_true")
 
@@ -499,20 +763,28 @@ def main() -> int:
         return _self_test()
 
     if args.post:
-        item_id = post("agent", args.post, args.body, kind=args.kind)
+        item_id = post("agent", args.post, args.body, kind=args.kind,
+                       verify=args.verify_test)
         print(f"Filed {item_id}." if item_id else "Could not file that.")
         return 0 if item_id else 1
 
+    if args.applied:
+        ok = mark_applied(args.applied, "agent", args.note)
+        print(
+            f"Recorded against {args.applied}. It stays open until LOCKBOT "
+            "verifies it." if ok else f"No item with id {args.applied}."
+        )
+        return 0 if ok else 1
+
     if args.resolve:
         ok = resolve(args.resolve, "agent", args.note)
-        print(f"Resolved {args.resolve}." if ok
-              else f"No open item with id {args.resolve}.")
+        print(f"Closed {args.resolve}." if ok
+              else f"No item with id {args.resolve}.")
         return 0 if ok else 1
 
     if args.all:
         for item in items():
-            mark = "done" if item["resolved"] else "OPEN"
-            print(f"[{item['id']}] {mark:<4} {item['sender']:<7} "
+            print(f"[{item['id']}] {item['status']:<9} {item['sender']:<7} "
                   f"{item['kind']:<8} {item['subject']}")
         return 0
 

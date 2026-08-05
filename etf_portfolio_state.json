@@ -133,6 +133,28 @@
                 "BUY 1 SCHD @ limit 34.19 -> order fake-order",
                 "BUY 1 SCHG @ limit 35.85 -> order fake-order"
             ]
+        },
+        {
+            "at": "2026-08-05T13:45:02+00:00",
+            "orders": [
+                "buy 1 SCHD",
+                "buy 1 SCHG"
+            ],
+            "results": [
+                "BUY 1 SCHD @ limit 34.13 -> order 4fc33e3c-c7d7-45e2-b82b-0257e19b3093",
+                "BUY 1 SCHG @ limit 36.25 -> order b980c142-4b28-4872-9534-1650d3c24aaa"
+            ]
+        },
+        {
+            "at": "2026-08-05T23:17:55+00:00",
+            "orders": [
+                "buy 1 SCHD",
+                "buy 1 SCHG"
+            ],
+            "results": [
+                "BUY 1 SCHD @ limit 34.19 -> order fake-order",
+                "BUY 1 SCHG @ limit 35.85 -> order fake-order"
+            ]
         }
     ]
 }
