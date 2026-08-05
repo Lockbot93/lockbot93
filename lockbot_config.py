@@ -457,6 +457,33 @@ CONVERSATION_LOG_FILE = PROJECT_FOLDER / "conversation_log.jsonl"
 # over or to be told when they were applied.
 AGENT_CHANNEL_FILE = PROJECT_FOLDER / "agent_channel.jsonl"
 
+# Push to the phone when LOCKBOT files something needing a code change.
+#
+# LOCKBOT can reach its engineer but cannot summon one: items sit in the
+# channel until somebody starts a session and reads it. The SELL_SHORT
+# gap sat open overnight for exactly that reason. This is the nudge.
+#
+# It stays quiet while you are mid-conversation with LOCKBOT, since you
+# will read the reply that filed the item, and it deduplicates per item
+# so a second filing alerts and a re-read never does.
+NOTIFY_AGENT_CHANNEL = True
+
+# Measure the shorts LOCKBOT is not allowed to trade.
+#
+# Shorting is off under $2,000 of equity, so SELL_SHORT signals were
+# rejected in stage one of the scan and discarded. They never reached
+# the shadow logger, which iterates approved setups only, so all 119
+# resolved shadow trades are LONG and roughly 350 short signals a
+# session went unmeasured. The strategy has been judged on half its
+# own output while the other half was invisible.
+#
+# These are advanced through the full stage-two pipeline -- alignment,
+# regime, adaptive bracket -- so what is measured is a short LOCKBOT
+# would actually have taken. They never receive trade_approved, and the
+# submission loop selects on that alone, so this measures without ever
+# being able to trade. Filed by LOCKBOT as agent_channel item 46169c86.
+SHADOW_LOG_BLOCKED_SHORTS = True
+
 
 # ============================================================
 # OPTIONS TRADING

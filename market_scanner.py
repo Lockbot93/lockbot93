@@ -184,6 +184,11 @@ USE_QUALITY_RANKING = _cfg("USE_QUALITY_RANKING", False)
 # share orders — see lockbot_config.py. Defaults True so a missing config
 # key can never silently stop trading.
 EQUITY_ENTRIES_ENABLED = _cfg("EQUITY_ENTRIES_ENABLED", True)
+
+# Advance shorts LOCKBOT cannot trade into the shadow log so the strategy
+# is measured on all of its output, not just the long half. Defaults
+# False so a missing config key cannot silently change what is measured.
+SHADOW_LOG_BLOCKED_SHORTS = _cfg("SHADOW_LOG_BLOCKED_SHORTS", False)
 QUALITY_WEIGHTS = load_weights() if load_weights else None
 
 # Notifications are limited to orders LOCKBOT actually submits. Opportunity
@@ -903,6 +908,25 @@ def main():
         # Decide which symbols are worth the slower timeframes.
         candidates = []
 
+        # Shorts LOCKBOT will not trade but should still MEASURE.
+        #
+        # Filed by LOCKBOT as agent_channel item 46169c86. Shorting is off
+        # under $2,000 of equity, so SELL_SHORT was rejected here in stage
+        # one and never went further -- no timeframe alignment, no bracket,
+        # and crucially never into `approved`, which is the list the shadow
+        # logger iterates. So every one of the 119 resolved shadow setups
+        # is LONG, and roughly 350 short signals a session were discarded
+        # unmeasured. The strategy has been judged on half its own output.
+        #
+        # These advance through the whole of stage two so what gets
+        # measured is a short LOCKBOT would actually have taken, sized the
+        # way it would have sized it -- a shadow trade built from anything
+        # less is scoring a bot that isn't running. They never receive
+        # trade_approved, and the submission loop selects on exactly that,
+        # so this cannot put an order on the wire even if shorting is
+        # switched on later.
+        shadow_candidates = []
+
         for result in results:
             if not market_clock.is_open:
                 result["approval_reason"] = "MARKET_IS_CLOSED"
@@ -916,6 +940,18 @@ def main():
                 result["approval_reason"] = "DAY_TRADE_LIMIT_REACHED"
             elif result["signal"] == "SELL_SHORT" and not ALLOW_SHORT_ENTRIES:
                 result["approval_reason"] = "SHORT_EXECUTION_NOT_ENABLED"
+
+                # The remaining stage-one gates are applied by hand here
+                # because the elif chain short-circuits: a short that also
+                # failed on volume would be caught by the clause above and
+                # look identical to a tradable one. Measuring those would
+                # inflate the short sample with setups LOCKBOT would have
+                # rejected anyway, which is worse than not measuring at all.
+                if (SHADOW_LOG_BLOCKED_SHORTS
+                        and result["volume_confirmed"]
+                        and result["score"] >= MIN_CONFIDENCE_SCORE):
+                    result["shadow_only"] = True
+                    shadow_candidates.append(result)
             elif not result["volume_confirmed"]:
                 result["approval_reason"] = "LOW_VOLUME"
             elif result["score"] < MIN_CONFIDENCE_SCORE:
@@ -924,6 +960,7 @@ def main():
                 candidates.append(result)
 
         metrics["candidates_advanced"] = len(candidates)
+        metrics["shadow_shorts_advanced"] = len(shadow_candidates)
 
         print(
             f"Stage 1 complete: {metrics['symbols_completed']} scanned, "
@@ -935,8 +972,14 @@ def main():
         # Stage two: slower timeframes, but only for the candidates
         # ------------------------------------------------------------------
 
-        if candidates:
-            candidate_symbols = [result["symbol"] for result in candidates]
+        # Shadow shorts ride the same pipeline. Fetching their higher
+        # timeframes together with the real candidates keeps the request
+        # count the same shape and guarantees both are judged against
+        # identical data.
+        stage_two = candidates + shadow_candidates
+
+        if stage_two:
+            candidate_symbols = [result["symbol"] for result in stage_two]
 
             print(
                 f"\nStage 2: higher timeframes for "
@@ -962,7 +1005,7 @@ def main():
                 label="1h",
             )
 
-            for result in candidates:
+            for result in stage_two:
                 symbol = result["symbol"]
 
                 bars_15m = bars_15m_by_symbol.get(symbol, [])
@@ -1031,6 +1074,24 @@ def main():
                 result["position_size"] = position_size
                 result["stop_percent"] = stop_percent
                 result["take_profit_percent"] = take_profit_percent
+
+                # The one line that keeps a measured short off the wire.
+                #
+                # trade_approved is what the submission loop selects on,
+                # so withholding it here is a structural guarantee rather
+                # than a check that could be forgotten: there is no path
+                # from a shadow_only result to an order. The reason stays
+                # SHORT_EXECUTION_NOT_ENABLED_MEASURED so signals.csv
+                # still says plainly that this was never tradable.
+                if result.get("shadow_only"):
+                    result["approval_reason"] = (
+                        "SHORT_EXECUTION_NOT_ENABLED_MEASURED"
+                    )
+                    metrics["shadow_shorts_measured"] = (
+                        metrics.get("shadow_shorts_measured", 0) + 1
+                    )
+                    continue
+
                 result["trade_approved"] = True
                 result["approval_reason"] = "APPROVED_FOR_PAPER_EXECUTION"
                 metrics["trades_approved"] += 1
@@ -1043,13 +1104,29 @@ def main():
 
         approved = [result for result in results if result["trade_approved"]]
 
+        # Shorts that completed stage two but are not tradable. Separate
+        # from `approved` on purpose: everything downstream that can put
+        # an order on the wire reads `approved`, and this list must never
+        # be merged into it.
+        shadow_shorts = [
+            result for result in results
+            if result.get("approval_reason")
+            == "SHORT_EXECUTION_NOT_ENABLED_MEASURED"
+        ]
+
+        # Measured, not traded. Quality is scored for both so the q_*
+        # columns exist for shorts too -- signal_research.py splits on
+        # them, and a column that is present for longs and blank for
+        # shorts would make the two halves incomparable.
+        measured = approved + shadow_shorts
+
         # Rank the approved setups. The old key was (score, volume_ratio),
         # but score is 100 for every approved setup — it restates the entry
         # condition rather than measuring quality — so volume_ratio was
         # doing the actual ranking, and the shadow data says it ranks
         # backwards. signal_quality.py scores measures the entry rules
         # don't already use. See USE_QUALITY_RANKING in lockbot_config.py.
-        for result in approved:
+        for result in measured:
             quality, components = score_setup(result)
             result["quality"] = quality
             result["quality_components"] = components
@@ -1424,10 +1501,10 @@ def main():
         # didn't, the shadow log would be scoring a bot that isn't running.
         # ------------------------------------------------------------------
 
-        if record_candidates and approved:
+        if record_candidates and measured:
             shadow_rows = []
 
-            for result in approved:
+            for result in measured:
                 entry_price = float(result["latest"]["close"])
                 is_long = result["signal"] == "BUY_LONG"
 
@@ -1726,6 +1803,76 @@ def _self_test():
         "and produces no signal",
         detect_signal(perfect, "NEUTRAL", data_is_fresh=True)[0] == "NO_TRADE",
     )
+
+    print()
+    print("A measured short can never become an order")
+
+    # The selection predicates, verbatim from the scan. If either of
+    # these changes shape, this test stops matching the code it guards
+    # -- which is the point of writing them out rather than importing a
+    # helper that could be edited to agree with a mistake.
+    MEASURED_REASON = "SHORT_EXECUTION_NOT_ENABLED_MEASURED"
+
+    fake_results = [
+        {"symbol": "AAA", "signal": "BUY_LONG", "trade_approved": True,
+         "approval_reason": "APPROVED_FOR_PAPER_EXECUTION"},
+        {"symbol": "BBB", "signal": "SELL_SHORT", "trade_approved": False,
+         "shadow_only": True, "approval_reason": MEASURED_REASON},
+        {"symbol": "CCC", "signal": "SELL_SHORT", "trade_approved": False,
+         "approval_reason": "SHORT_EXECUTION_NOT_ENABLED"},
+    ]
+
+    approved_now = [r for r in fake_results if r["trade_approved"]]
+    shadow_now = [r for r in fake_results
+                  if r.get("approval_reason") == MEASURED_REASON]
+
+    check("the submission list holds only approved setups",
+          [r["symbol"] for r in approved_now] == ["AAA"],
+          str([r["symbol"] for r in approved_now]))
+    check("a measured short is not in it",
+          all(r["symbol"] != "BBB" for r in approved_now))
+    check("but it IS measured", [r["symbol"] for r in shadow_now] == ["BBB"])
+    check("the two lists never overlap",
+          not ({r["symbol"] for r in approved_now}
+               & {r["symbol"] for r in shadow_now}))
+    check("a short that failed another gate is neither",
+          all(r["symbol"] != "CCC" for r in approved_now + shadow_now))
+    check("no measured short carries trade_approved",
+          all(not r["trade_approved"] for r in shadow_now))
+
+    print()
+    print("Short shadow levels are the right way up")
+
+    # Never exercised before this change, because no short ever reached
+    # the shadow logger. A short profits when price FALLS, so its target
+    # must sit below the entry and its stop above -- inverted levels
+    # would score every short backwards and look like a signal.
+    entry = 20.00
+    stop_pct, target_pct = 0.02, 0.04
+
+    short_stop = round(entry * (1 + stop_pct), 2)
+    short_target = round(entry * (1 - target_pct), 2)
+
+    check("a short's stop is above the entry", short_stop > entry,
+          f"{short_stop} vs {entry}")
+    check("and its target is below", short_target < entry,
+          f"{short_target} vs {entry}")
+
+    long_stop = round(entry * (1 - stop_pct), 2)
+    long_target = round(entry * (1 + target_pct), 2)
+
+    check("a long's are the other way", long_stop < entry < long_target)
+    check("and the reward:risk matches on both sides",
+          abs((long_target - entry) / (entry - long_stop)
+              - (entry - short_target) / (short_stop - entry)) < 1e-9)
+
+    print()
+    print("The measurement switch is real and defaults safe")
+
+    check("the scanner reads the flag from config",
+          isinstance(SHADOW_LOG_BLOCKED_SHORTS, bool))
+    check("and lockbot_config is the source of truth",
+          hasattr(config, "SHADOW_LOG_BLOCKED_SHORTS"))
 
     print()
 

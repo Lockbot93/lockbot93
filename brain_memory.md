@@ -144,3 +144,5 @@ safe to edit or prune by hand.
 - **2026-08-05 15:31** — The regime split is now perfectly balanced at n=65 each: STRONG_UPTREND 8/65 (12.3%, −0.63R) vs WEAK_UPTREND 16/65 (24.6%, −0.26R), two-tail p≈0.07 — the closest to significance yet but still short; per the standing plan, hold the STRONG_UPTREND block recommendation until n≈200.
 
 - **2026-08-05 15:31** — The scan universe grew 47→52 symbols without the UNIVERSE_TOP_N hand edit being applied, so the volatility-band survivor count drifts on its own by a few names day to day — still roughly a third of the 150 cap.
+
+- **2026-08-05 18:38** — 2026-08-05: Item 46169c86 (short shadow-logging) reopened as PREMATURE only — code review passed in full (flag True, shadow_only stage-1 tagging, full stage-2 ride, no trade_approved path, measured=approved+shadow_shorts, self-tests cover it); confirm after the next market session once get_shadow_breakdown(side) shows SHORT rows — no code re-work is needed.

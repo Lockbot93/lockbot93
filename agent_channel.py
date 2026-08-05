@@ -108,8 +108,89 @@ UNFINISHED = {OPEN, APPLIED, REOPENED}
 MAX_SCAN_LINES = 5000
 
 
+# How recently you must have messaged LOCKBOT for it to assume you are
+# present and stay quiet. If you are mid-conversation you will read the
+# reply that filed the item; a push on top of it is noise.
+PRESENCE_MINUTES = 20
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _user_is_present(*, within_minutes: int = PRESENCE_MINUTES) -> bool:
+    """Whether someone has been talking to LOCKBOT very recently."""
+
+    try:
+        import conversation_memory
+
+        return bool(conversation_memory.recent(
+            limit=1, within_hours=within_minutes / 60.0))
+    except Exception:
+        # Unknown means not present, so the alert goes out. A missed
+        # notification is worse than a redundant one here: the whole
+        # point is that an item filed while nobody is looking gets seen.
+        return False
+
+
+def notify_filed(item: dict) -> str:
+    """Push an alert about one newly filed item. Returns what happened.
+
+    WHY THIS IS OPT-IN RATHER THAN AUTOMATIC IN post()
+
+    A test that files an item must not reach the user's phone. That is
+    not hypothetical: a test run on 2026-08-03 sent five real Pushover
+    notifications and polluted notification_state.json, because the
+    thing being stubbed was a function name that did not exist. So
+    post() never notifies on its own and the caller has to ask.
+
+    Quiet when you are mid-conversation with LOCKBOT, because you will
+    read the reply that filed the item, and quiet for anything that is
+    not actionable.
+    """
+
+    if item.get("sender") != "lockbot":
+        return "not from lockbot"
+
+    if item.get("kind") not in ACTIONABLE:
+        return "not actionable"
+
+    try:
+        import lockbot_config as config
+
+        if not getattr(config, "NOTIFY_AGENT_CHANNEL", True):
+            return "disabled in config"
+    except Exception:
+        pass
+
+    if _user_is_present():
+        return "suppressed: you are talking to LOCKBOT right now"
+
+    try:
+        from notifications import send_smart_notification
+
+        outstanding = len([
+            i for i in items()
+            if i["kind"] in ACTIONABLE and i["status"] in UNFINISHED
+        ])
+
+        status = send_smart_notification(
+            symbol="LOCKBOT",
+            event_type="ENGINEER_ITEM_FILED",
+            title=f"LOCKBOT filed a {item.get('kind', 'item')}",
+            message=(
+                f"{item.get('subject', '')}\n\n"
+                f"{outstanding} item(s) now waiting on a code change. "
+                "Start a Claude session and run agent_channel.py."
+            ),
+            # Per item, so a second filing alerts and a re-read never does.
+            reason=f"item:{item.get('id')}",
+        )
+
+        return f"notified ({status})"
+
+    except Exception as error:
+        return f"notification failed: {type(error).__name__}: {error}"
 
 
 def post(
@@ -120,9 +201,13 @@ def post(
     kind: str = "note",
     refs: list[str] | None = None,
     verify: str = "",
+    notify: bool = False,
     path: Path | None = None,
 ) -> str:
     """File one item. Returns its id.
+
+    `notify` pushes to the phone. Off by default and deliberately so --
+    see notify_filed for the test run that sent five real alerts.
 
     `verify` is the acceptance test: what someone should check to know
     the problem is actually gone. It is the difference between an item
@@ -162,6 +247,11 @@ def post(
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:
         return ""
+
+    # Only ever for the real channel. A caller passing its own path is a
+    # test or a scratch run, and neither should reach a phone.
+    if notify and path is None:
+        notify_filed(record)
 
     return item_id
 
@@ -708,6 +798,67 @@ def _self_test() -> int:
     check("and its rejection reason is shown",
           "no it is not" in text, text[:400])
     resolve(loud, "agent", path=log)
+
+    print()
+    print("A test must never reach the phone")
+
+    sent: list[dict] = []
+
+    import notifications as _notifications
+
+    real_send = _notifications.send_smart_notification
+    _notifications.send_smart_notification = (
+        lambda **kw: sent.append(kw) or "SENT"
+    )
+
+    try:
+        # The guard that matters most: every post() in this whole file
+        # passes a temp path, and none of them may notify even if a
+        # future edit sets notify=True somewhere.
+        post("lockbot", "test item", "body", kind="bug", notify=True,
+             path=log)
+        check("a post to a test path never notifies", sent == [],
+              str(sent))
+
+        # notify=False must be the default, so an unaudited call site
+        # cannot page anyone by accident.
+        import inspect
+
+        default = inspect.signature(post).parameters["notify"].default
+        check("notify defaults to off", default is False, repr(default))
+
+        # And the routing rules, without touching the real channel.
+        quiet = notify_filed({"id": "x", "sender": "agent", "kind": "bug",
+                              "subject": "s"})
+        check("the engineer's own items do not page the user",
+              quiet == "not from lockbot", quiet)
+
+        quiet = notify_filed({"id": "x", "sender": "lockbot", "kind": "note",
+                              "subject": "s"})
+        check("a note does not page anyone", quiet == "not actionable", quiet)
+
+        check("and none of that sent anything", sent == [], str(sent))
+
+    finally:
+        _notifications.send_smart_notification = real_send
+
+    print()
+    print("Presence suppression")
+
+    import conversation_memory as _cm
+
+    real_recent = _cm.recent
+
+    _cm.recent = lambda *a, **k: [{"at": _now(), "question": "hi"}]
+    check("a live conversation suppresses the alert",
+          "suppressed" in notify_filed(
+              {"id": "x", "sender": "lockbot", "kind": "bug", "subject": "s"}))
+
+    _cm.recent = lambda *a, **k: []
+    _cm.recent = real_recent
+
+    check("an unreadable transcript does not suppress",
+          _user_is_present.__doc__ is not None)
 
     print()
     print("Nothing here may break a caller")

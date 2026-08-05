@@ -925,6 +925,9 @@ def build_tools() -> list:
             kind=kind,
             refs=[r.strip() for r in refs.split(",") if r.strip()],
             verify=how_to_verify,
+            # Nudge the phone. Suppressed automatically if the user is
+            # mid-conversation with you, since they will read this reply.
+            notify=True,
         )
 
         if not item_id:
