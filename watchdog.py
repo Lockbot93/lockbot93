@@ -187,8 +187,13 @@ def check_orphaned_positions() -> tuple[bool, str]:
         # every one of LOCKBOT's own option positions as orphaned.
         positions = equity_positions(trading_client.get_all_positions())
 
+        # Say EQUITY, every time. This check filters options out three
+        # lines above and then reported "No open broker positions" while
+        # three option legs were open at the broker -- true of what it
+        # examined, misleading about what it sounds like. A watchdog line
+        # read at 2am is exactly where that costs something.
         if not positions:
-            return True, "No open broker positions."
+            return True, "No open equity positions (options not in scope here)."
 
         pending_rows = _read_pending_trades()
         tracked_symbols = {
@@ -212,7 +217,7 @@ def check_orphaned_positions() -> tuple[bool, str]:
                 "broker positions) and won't be journaled when it closes."
             )
 
-        return True, f"{len(positions)} open position(s), all tracked."
+        return True, f"{len(positions)} open equity position(s), all tracked."
 
     except Exception as error:
         return False, f"Could not check for orphaned positions: {type(error).__name__}: {error}"
@@ -265,6 +270,58 @@ def check_universe_freshness(market_open: bool | None) -> tuple[bool, str]:
     return True, f"Universe file rebuilt {age_hours:.1f} hours ago."
 
 
+def check_telegram_bot(market_open: bool | None) -> tuple[bool, str]:
+    """Check that the phone can still reach LOCKBOT.
+
+    The bot is not safety-critical -- it places no trades and its absence
+    risks no capital. What it costs is knowing. It is the channel you
+    would use to find out whether anything is wrong, so a dead one is
+    invisible precisely when it matters, and you discover it by messaging
+    a bot that never answers.
+
+    Unlike the controller, the bot is started from the Startup folder and
+    so needs a logged-in session. Logging out kills it while the
+    controller keeps trading as a scheduled task. That is the case worth
+    reporting, and it is also why this is gated on market hours: a bot
+    that is down overnight is expected, and alerting on it would repeat
+    the mistake health_monitor made by reporting CRITICAL every weekend.
+    """
+
+    if not getattr(config, "TELEGRAM_WATCHDOG_ENABLED", True):
+        return True, "Telegram check disabled."
+
+    import os
+
+    if not os.getenv("TELEGRAM_BOT_TOKEN"):
+        return True, "No Telegram token configured, so no bot is expected."
+
+    try:
+        from lockbot_process import find_processes
+
+        running = find_processes("lockbot_telegram.py")
+    except Exception as error:
+        return True, (
+            f"Could not enumerate processes ({type(error).__name__}); "
+            "not treating that as the bot being down."
+        )
+
+    if running:
+        return True, f"Telegram bot running (pid {running[0]['pid']})."
+
+    if market_open is False:
+        return True, (
+            "Telegram bot is not running, but the market is closed. "
+            "It starts with the next login."
+        )
+
+    return False, (
+        "The Telegram bot is not running, so the phone cannot reach "
+        "LOCKBOT while it is trading. It is launched from the Startup "
+        "folder, so a logout would explain it. Restart with "
+        "'python lockbot_process.py --start-telegram'."
+    )
+
+
 def run_watchdog_check() -> bool:
     """
     Run all watchdog checks. Returns True if everything looks healthy.
@@ -293,6 +350,7 @@ def run_watchdog_check() -> bool:
         ("Critical module check", check_for_critical_modules()),
         ("Orphaned position check", check_orphaned_positions()),
         ("Universe file freshness", check_universe_freshness(market_open)),
+        ("Telegram reachability", check_telegram_bot(market_open)),
     ]
 
     problems: list[str] = []

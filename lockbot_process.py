@@ -249,6 +249,100 @@ def _kill(pid: int) -> bool:
         return False
 
 
+def _launch_detached(
+    script: Path, args: list[str] | None = None
+) -> tuple[bool, Exception | None]:
+    """Start a script in its own window, outliving whatever launched it.
+
+    Extracted from start_controller so anything else that must survive
+    the shell can reuse it rather than reimplement it. The Telegram bot
+    is the first: it is started from an agent session or a terminal, and
+    a copy that dies with its launcher is worse than one that never
+    started, because nothing reports it missing.
+
+    `args` exists because the controller takes none and lockbot_telegram
+    requires --run. Without it the bot printed its help text into a new
+    console and exited, which looks exactly like a crash from out here:
+    launch reported success, no process appeared, no error anywhere.
+
+    Returns (launched, error) rather than a message, so callers can word
+    their own.
+    """
+
+    python = PROJECT_FOLDER / ".venv" / "Scripts" / "python.exe"
+    interpreter = str(python) if python.exists() else sys.executable
+
+    new_console = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+
+    attempts = [new_console | breakaway, new_console] if breakaway else [new_console]
+
+    last_error: Exception | None = None
+
+    for creation_flags in attempts:
+        try:
+            subprocess.Popen(
+                [interpreter, "-u", str(script), *(args or [])],
+                cwd=str(PROJECT_FOLDER),
+                creationflags=creation_flags,
+                close_fds=True,
+            )
+            return True, None
+        except OSError as error:
+            # Raised when the parent job forbids breakaway. Fall through
+            # to the plain new-console attempt rather than giving up.
+            last_error = error
+
+    return False, last_error
+
+
+def start_telegram() -> str:
+    """Start the Telegram bot so it survives the session that started it.
+
+    Deliberately NOT registered as a scheduled task: that needs an
+    elevated shell and has failed with Access Denied here. This is the
+    thing that works without admin. It does mean the bot does not come
+    back by itself after a reboot -- watchdog.py does not watch it
+    either -- so a missing bot is silent. Worth knowing before relying
+    on it for anything time-critical.
+    """
+
+    if EXECUTION_DISABLED:
+        return "Execution is disabled in this process."
+
+    existing = find_processes("lockbot_telegram.py")
+
+    if existing:
+        pids = ", ".join(str(p["pid"]) for p in existing)
+        return (
+            f"Already running (pid {pids}). Two copies long-polling the "
+            "same token would steal each other's updates, so this will "
+            "not start a second."
+        )
+
+    script = PROJECT_FOLDER / "lockbot_telegram.py"
+
+    if not script.exists():
+        return "lockbot_telegram.py not found."
+
+    launched, error = _launch_detached(script, ["--run"])
+
+    if not launched:
+        return f"Launch failed: {type(error).__name__}: {error}"
+
+    for _ in range(8):
+        time.sleep(1.5)
+        started = find_processes("lockbot_telegram.py")
+
+        if started:
+            return f"Started. pid {started[0]['pid']}."
+
+    return (
+        "Launch issued but no Telegram process appeared after 12s. "
+        "Check the new console window for a startup error."
+    )
+
+
 def start_controller(killer=None) -> str:
     """Start the controller in its own window."""
 
@@ -301,31 +395,7 @@ def start_controller(killer=None) -> str:
     # entirely, and a controller with no window is one nobody can see has
     # died. Some jobs forbid breakaway, so the flag is dropped and
     # retried rather than allowed to fail the launch outright.
-    python = PROJECT_FOLDER / ".venv" / "Scripts" / "python.exe"
-    interpreter = str(python) if python.exists() else sys.executable
-
-    new_console = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-    breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
-
-    attempts = [new_console | breakaway, new_console] if breakaway else [new_console]
-
-    launched = False
-    last_error: Exception | None = None
-
-    for creation_flags in attempts:
-        try:
-            subprocess.Popen(
-                [interpreter, "-u", str(script)],
-                cwd=str(PROJECT_FOLDER),
-                creationflags=creation_flags,
-                close_fds=True,
-            )
-            launched = True
-            break
-        except OSError as error:
-            # Raised when the parent job forbids breakaway. Fall through
-            # to the plain new-console attempt rather than giving up.
-            last_error = error
+    launched, last_error = _launch_detached(script)
 
     if not launched:
         return f"Launch failed: {type(last_error).__name__}: {last_error}"
@@ -607,6 +677,8 @@ def main() -> int:
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--cleanup", action="store_true")
     parser.add_argument("--run", metavar="COMPONENT")
+    parser.add_argument("--start-telegram", action="store_true",
+                        help="start the Telegram bot, detached")
     parser.add_argument("--force", action="store_true",
                         help="stop even with open option positions")
     parser.add_argument("--self-test", action="store_true")
@@ -618,6 +690,10 @@ def main() -> int:
 
     if args.start:
         print(start_controller())
+        return 0
+
+    if args.start_telegram:
+        print(start_telegram())
         return 0
 
     if args.stop:
