@@ -367,7 +367,25 @@ def collect_state() -> dict[str, Any]:
             "heartbeat": _file_age_hours(config.HEARTBEAT_FILE),
         },
         "brain_memory": read_memory(),
+        "engineer_channel": _engineer_channel(),
     }
+
+
+def _engineer_channel() -> dict[str, Any]:
+    """Messages to and from whoever edits the code.
+
+    Separate from brain_memory on purpose. brain_memory is what LOCKBOT
+    tells ITSELF; this is addressed to someone else and has a status, so
+    an unfixed bug stays visible until it is actually fixed and a fixed
+    one stops being re-reported.
+    """
+
+    try:
+        from agent_channel import brief_for_lockbot
+
+        return brief_for_lockbot()
+    except Exception as error:
+        return {"unavailable": f"{type(error).__name__}: {error}"}
 
 
 def read_memory() -> str:
@@ -854,6 +872,57 @@ def build_tools() -> list:
         return append_memory(note)
 
     @beta_tool
+    def file_for_engineer(
+        subject: str,
+        body: str,
+        kind: str = "bug",
+        refs: str = "",
+    ) -> str:
+        """Hand work to the person who edits LOCKBOT's code, durably.
+
+        You cannot change code. When you find something that needs a code
+        change, file it here instead of writing a patch into your sandbox
+        -- a sandbox export is lost the moment the conversation ends, and
+        on 2026-08-04 two correctly diagnosed bugs were lost exactly that
+        way and had to be found again the next day.
+
+        The item stays open until someone resolves it, and you will see
+        both the open item and its resolution in your state snapshot, so
+        you can tell what has actually been applied rather than guessing
+        or asking.
+
+        Include enough that the fix can be made without you: the file,
+        the mechanism, and what proves it. Do not file the same thing
+        twice -- check engineer_channel in your state first.
+
+        Args:
+            subject: One line. What is wrong.
+            body: The diagnosis. File, mechanism, evidence, suggested fix.
+            kind: "bug" for something broken, "question" to ask something,
+                "note" for context needing no action.
+            refs: Comma-separated filenames this concerns.
+        """
+
+        from agent_channel import post
+
+        item_id = post(
+            "lockbot",
+            subject,
+            body,
+            kind=kind,
+            refs=[r.strip() for r in refs.split(",") if r.strip()],
+        )
+
+        if not item_id:
+            return "Could not file that. Check the sender and kind."
+
+        return (
+            f"Filed as {item_id}. It stays open until resolved, and it is "
+            "in your state snapshot from now on, so you will know when it "
+            "has been applied."
+        )
+
+    @beta_tool
     def get_process_status() -> str:
         """Check what LOCKBOT processes are running: whether the controller is
         up, how long for, whether its log is fresh, and any brain, HUD or
@@ -1177,6 +1246,7 @@ def build_tools() -> list:
         get_process_status,
         read_project_file,
         remember,
+        file_for_engineer,
         propose_strategy,
         strategy_scorecard,
         recommend_change,
@@ -1243,6 +1313,14 @@ because it is not the one currently in use.
 - READING ANY FILE in the LOCKBOT folder, including logs and your own source.
   Reach for it when someone asks what happened at a particular time, or how a
   rule is actually implemented rather than how it is described.
+- HANDING WORK TO YOUR ENGINEER with file_for_engineer. You cannot edit code.
+  When something needs a code change, file it — do NOT write a patch into
+  your reply and call it exported. On 2026-08-04 you diagnosed two real bugs
+  that way and both were lost, because your answer is not a filesystem.
+  Filed items persist, carry a status, and appear in engineer_channel in your
+  state snapshot along with their resolutions, so read that before filing to
+  avoid raising the same thing twice, and read it before claiming something
+  is unapplied — it may have been done since.
 
 The session you are in right now may have only some of these switched on. If
 someone asks whether you can hear them and voice input is not active in this

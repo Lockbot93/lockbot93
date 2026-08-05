@@ -141,6 +141,38 @@ class OptionPosition:
     exit_reason: str | None = None
     paper_trade: bool = True
 
+    def __post_init__(self) -> None:
+        """Round the dollar fields to the cent, however they arrived.
+
+        WHY HERE AND NOT AT THE CALL SITES
+
+        `0.56 * 100` is 56.00000000000001. That value reached the PCG
+        put's entry_debit, made its +50% target 84.00000000000001, and
+        stopped it taking profit at exactly $84.00 -- it needed $84.01.
+
+        The first fix rounded in net_fill_dollars and again in
+        load_positions, which covered the two paths that were known
+        about. It missed a third: options_scanner.py computes
+        `limit_per_contract * CONTRACT_MULTIPLIER` and passes it
+        straight to entry_debit, so every NEW position could arrive
+        dirty even with both other fixes in place.
+
+        Rounding in the constructor covers every path that exists and
+        every one added later, which is the only version of this fix
+        that stays true. Premiums are cent-denominated, so this removes
+        representation error without discarding anything real.
+        """
+
+        try:
+            self.entry_debit = round(float(self.entry_debit or 0.0), 2)
+        except (TypeError, ValueError):
+            self.entry_debit = 0.0
+
+        try:
+            self.highest_value = round(float(self.highest_value or 0.0), 2)
+        except (TypeError, ValueError):
+            self.highest_value = 0.0
+
     @property
     def is_spread(self) -> bool:
         return bool(self.short_symbol)
@@ -173,9 +205,26 @@ def load_positions(path: Path | None = None) -> dict[str, OptionPosition]:
 
     for position_id, values in (raw or {}).items():
         try:
-            positions[position_id] = OptionPosition(**values)
+            position = OptionPosition(**values)
         except TypeError as error:
             print(f"Skipping malformed position {position_id}: {error}")
+            continue
+
+        # Clean the debit on the way IN, not only on the way out.
+        #
+        # net_fill_dollars now rounds, but the PCG put's
+        # 56.00000000000001 was already written to disk before it did,
+        # and every exit band is a percentage OF that number. Fixing the
+        # source alone leaves the position that is open right now still
+        # needing $84.01 to hit an $84.00 target.
+        #
+        # Applied to every position on every load rather than as a
+        # one-off repair, because the same dirt can arrive from any
+        # older state file or a hand edit.
+        position.entry_debit = round(float(position.entry_debit or 0.0), 2)
+        position.highest_value = round(float(position.highest_value or 0.0), 2)
+
+        positions[position_id] = position
 
     return positions
 
@@ -667,6 +716,23 @@ def net_fill_dollars(order: Any) -> float | None:
     was a $24 debit closed for a $16 credit: -$8.00. A debit spread's
     maximum possible loss is the debit paid, so -155% was never a
     reachable number.
+
+    THE RESULT IS ROUNDED TO THE CENT, AND THAT IS NOT COSMETIC.
+
+    `0.56 * 100` is 56.00000000000001 in binary floating point. That
+    value was persisted as the PCG put's entry debit, so its +50% target
+    became 84.00000000000001, and the take-profit test
+
+        current_value >= target   ->   84.0 >= 84.00000000000001
+
+    was False. The position could not take profit at exactly $84.00 --
+    it needed $84.01. The comparison was never wrong; it was fed a dirty
+    number, and the self-test covering "takes profit exactly at target"
+    passed because it used clean inputs.
+
+    Premiums are quoted in cents, so rounding to the cent is exact
+    rather than a fudge: it removes representation error without
+    discarding anything real.
     """
 
     price = getattr(order, "filled_avg_price", None)
@@ -679,7 +745,7 @@ def net_fill_dollars(order: Any) -> float | None:
     except (TypeError, ValueError):
         return None
 
-    return amount
+    return round(amount, 2)
 
 
 def exit_credit_from_order(order: Any) -> float | None:
@@ -1468,6 +1534,48 @@ def _self_test() -> int:
     at_target = decide_exit(make(), 105.0, now=now, today=today, **rules)
     check("takes profit exactly at target",
           at_target.should_exit and at_target.reason == TAKE_PROFIT, at_target.reason)
+
+    # The check above passed for months while a real position could not
+    # take profit, because it used a clean 70.0 debit. The PCG put was
+    # holding 56.00000000000001 -- 0.56 * 100 in binary floating point --
+    # so its target was 84.00000000000001 and $84.00 was not enough.
+    #
+    # Reproduce with the dirty number rather than the tidy one, and
+    # build it the way options_scanner.py does: a raw multiplication
+    # handed straight to the constructor.
+    dirty = make(entry_debit=0.56 * CONTRACT_MULTIPLIER)
+    check("a debit straight from 0.56 * 100 is cleaned by the constructor",
+          dirty.entry_debit == 56.0, repr(dirty.entry_debit))
+
+    exact = decide_exit(dirty, 84.0, now=now, today=today, **rules)
+    check("takes profit at exactly $84.00 on a $56.00 debit",
+          exact.should_exit and exact.reason == TAKE_PROFIT, exact.reason)
+
+    check("net_fill_dollars rounds to the cent",
+          net_fill_dollars(type("O", (), {"filled_avg_price": 0.56})()) == 56.0,
+          repr(net_fill_dollars(type("O", (), {"filled_avg_price": 0.56})())))
+
+    # And the dirt already on disk must be cleaned on the way in, or the
+    # position open right now keeps its bad target.
+    import tempfile as _tempfile
+
+    _dirty_state = Path(_tempfile.mkdtemp()) / "options_position_state.json"
+    _dirty_state.write_text(json.dumps({
+        "p1": {
+            "position_id": "p1", "underlying": "PCG", "strategy": "LONG_PUT",
+            "long_symbol": "PCG260821P00017500", "contracts": 1,
+            "entry_debit": 56.00000000000001,
+            "entry_time": "2026-08-01T14:00:00+00:00",
+            "expiration": "2026-08-21", "highest_value": 84.00000000000001,
+        }
+    }), encoding="utf-8")
+
+    _loaded = load_positions(_dirty_state)
+    check("a dirty debit already on disk is cleaned on load",
+          _loaded["p1"].entry_debit == 56.0, repr(_loaded["p1"].entry_debit))
+    check("and so is the high-water mark",
+          _loaded["p1"].highest_value == 84.0,
+          repr(_loaded["p1"].highest_value))
 
     # A stop now needs confirming, so this takes two looks at the same
     # position rather than one at a fresh one. Reusing make() here would

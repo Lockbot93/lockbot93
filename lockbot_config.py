@@ -451,6 +451,12 @@ SIGNALS_FILE = PROJECT_FOLDER / "signals.csv"
 # deleting it loses conversation history and nothing else.
 CONVERSATION_LOG_FILE = PROJECT_FOLDER / "conversation_log.jsonl"
 
+# Messages between LOCKBOT and whoever edits its code. Added 2026-08-05
+# after LOCKBOT diagnosed two real bugs over Telegram, wrote a patch for
+# each into a sandbox nothing else can read, and had no way to hand them
+# over or to be told when they were applied.
+AGENT_CHANNEL_FILE = PROJECT_FOLDER / "agent_channel.jsonl"
+
 
 # ============================================================
 # OPTIONS TRADING
