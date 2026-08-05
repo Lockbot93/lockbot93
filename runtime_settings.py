@@ -74,6 +74,17 @@ ALLOWED: dict[str, tuple] = {
         float, 0.10, 0.90, "Stop, as a fraction of premium."),
     "MAX_DAILY_LOSS_PERCENT": (
         float, 0.005, 0.10, "Daily loss budget before entries stop."),
+
+    # Added 2026-08-04 alongside the cost gate. Registered here because
+    # they are exactly the kind of threshold worth tuning from evidence,
+    # and a setting the learning loop can recommend but nothing can apply
+    # is a dead end -- which is how this omission was found.
+    "OPTIONS_MAX_IV_PREMIUM": (
+        float, 1.00, 3.00,
+        "Implied vol as a multiple of realised. 1.0 is fairly priced."),
+    "OPTIONS_MAX_DAILY_THETA": (
+        float, 0.010, 0.100,
+        "Time decay per day as a fraction of premium."),
 }
 
 

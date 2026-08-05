@@ -873,6 +873,57 @@ def build_tools() -> list:
         )
 
     @beta_tool
+    def recommend_change(
+        setting: str,
+        value: str,
+        rationale: str,
+        evidence: str,
+        sample_size: int,
+    ) -> str:
+        """RECOMMEND a setting change. Applies nothing.
+
+        This is how you turn something you have learned into something
+        the user can act on. It records the proposal with its evidence;
+        they decide.
+
+        Use it when the data supports a change, not when a change feels
+        sensible. State the sample size honestly — a recommendation from
+        twelve observations is recorded as THIN and should say so.
+
+        Do not recommend a change you cannot cite evidence for. The
+        volume-ratio split looked convincing across 55 setups and was
+        chance at p=0.61; a loop that acted on findings that strong would
+        have retuned the ranking around noise.
+
+        Args:
+            setting: A remotely changeable setting (see list_settings).
+            value: The proposed value.
+            rationale: Why, in one sentence.
+            evidence: What was measured, and over how much data.
+            sample_size: Number of observations behind it.
+        """
+
+        import recommendations
+
+        ok, message = recommendations.propose(
+            setting, value, rationale, evidence, sample_size
+        )
+
+        return message
+
+    @beta_tool
+    def list_recommendations() -> str:
+        """Show pending setting recommendations and how past ones went.
+
+        Read this before recommending something new — a proposer whose
+        dismissed ideas are forgotten looks better than it is.
+        """
+
+        import recommendations
+
+        return recommendations.report()
+
+    @beta_tool
     def strategy_scorecard() -> str:
         """How the strategy proposer has actually performed: how many
         rules it has proposed, and how many looked promising.
@@ -1049,6 +1100,8 @@ def build_tools() -> list:
         remember,
         propose_strategy,
         strategy_scorecard,
+        recommend_change,
+        list_recommendations,
         list_settings,
         change_setting,
         reset_setting,
