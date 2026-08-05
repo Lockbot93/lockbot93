@@ -211,6 +211,32 @@ Each was written after the behaviour it prevents actually happened.
   reading: median 28.8, max 63.8, and a floor of 50 would reject 98%.
   Do not set `OPTIONS_MIN_QUALITY` from one session.
 
+## Widening the profit target does not fix the win rate (tested 2026-08-04)
+
+The arithmetic is seductive: at a 20.2% win rate you need a 3.95:1 payout
+to break even, and the options bands give 1.43:1. So let winners run.
+
+It was tested and it is wrong. Sweeping the reward ratio over real bars:
+
+    reward   breakeven   trades   win rate   avg R
+      1.43      41.2%       20      40.0%    -0.03
+      2.00      33.3%       14      14.3%    -0.57
+      3.00      25.0%       12       0.0%    -1.00
+      4.00      20.0%       12       0.0%    -1.00
+
+Every widening made it worse. At 3:1 and beyond nothing reaches the
+target at all — the moves are not there inside the holding window, so a
+higher payout multiplies a number that never occurs.
+
+Note the top row: at the tightest target tested the signal wins 40% and
+sits at −0.03R, essentially breakeven. That is on SHARES, where there is
+no spread paid twice and no theta. It is 20 trades over 5 days and proves
+nothing, but it is the one configuration that has ever looked close.
+
+The lesson is not about targets. It is that "many small losses, few huge
+wins" requires the huge wins to be reachable, and on this universe and
+holding period they are not.
+
 ## What the evidence currently says about the strategy
 
 Read this before building anything intended to improve returns.
