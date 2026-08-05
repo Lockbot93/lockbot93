@@ -785,6 +785,108 @@ def build_tools() -> list:
         return json.dumps(status(), indent=2, default=str)
 
     @beta_tool
+    def propose_strategy(
+        name: str,
+        rationale: str,
+        conditions_json: str,
+        trend: str = "ANY",
+        side: str = "BUY_LONG",
+    ) -> str:
+        """PROPOSE AND BACKTEST an entry rule. Places no orders.
+
+        The rule is DATA, not code. Give conditions as a JSON list of
+        objects, each with "left", "op" and "right":
+
+          [{"left": "close", "op": "<", "right": "ema_9"},
+           {"left": "rsi", "op": "between", "right": [30, 45]}]
+
+        Fields available: close, open, high, low, ema_9, ema_21, vwap,
+        rsi, macd, macd_signal, atr, volume, volume_avg_20.
+        Operators: > < >= <= between outside.
+        "right" may be another field name or a number; between/outside
+        take two numbers.
+
+        The rule is compiled and backtested over real history, and the
+        result — including failure — is recorded. Read the scorecard
+        first with strategy_scorecard: a rule that looks good means one
+        thing after three proposals and something else after fifty.
+
+        Be honest in the rationale. A rule you cannot state a reason for
+        is a curve fit, and the validator rejects proposals without one.
+
+        Args:
+            name: Short name for the rule.
+            rationale: Why this might work. Required.
+            conditions_json: JSON list of condition objects.
+            trend: BULLISH, BEARISH or ANY.
+            side: BUY_LONG or SELL_SHORT.
+        """
+
+        import json as _json
+
+        import strategy_lab
+
+        try:
+            conditions = _json.loads(conditions_json)
+        except _json.JSONDecodeError as error:
+            return f"conditions_json is not valid JSON: {error}"
+
+        spec = {
+            "name": name,
+            "rationale": rationale,
+            "trend": trend,
+            "side": side,
+            "conditions": conditions,
+        }
+
+        ok, why = strategy_lab.validate_spec(spec)
+
+        if not ok:
+            strategy_lab.record_proposal(spec, None, "REJECTED")
+            return f"REJECTED: {why}"
+
+        try:
+            import backtest
+            import lockbot_config as _cfg
+            from universe import load_universe
+
+            symbols = load_universe(_cfg.UNIVERSE_FILE)
+            frames = backtest.load_history(symbols, days=5)
+        except Exception as error:
+            return f"Could not load history: {type(error).__name__}: {error}"
+
+        if not frames:
+            return "No usable history; cannot judge the proposal."
+
+        verdict, result = strategy_lab.evaluate(spec, frames)
+        strategy_lab.record_proposal(spec, result, verdict)
+
+        return (
+            f"{strategy_lab.describe_spec(spec)}\n\n"
+            f"VERDICT: {verdict}\n"
+            f"  trades {result.get('trades')} over {result.get('days')} day(s), "
+            f"{result.get('busiest_share', 0):.0%} from the busiest\n"
+            f"  win rate {result.get('win_rate', 0):.1%} against a "
+            f"{result.get('breakeven', 0):.1%} breakeven\n"
+            f"  expectancy {result.get('expectancy_r', 0):+.3f} R\n\n"
+            "Recorded. This does not deploy anything."
+        )
+
+    @beta_tool
+    def strategy_scorecard() -> str:
+        """How the strategy proposer has actually performed: how many
+        rules it has proposed, and how many looked promising.
+
+        Read this before trusting any single result. If twenty rules have
+        been proposed and one looks good, that one is what chance looks
+        like.
+        """
+
+        import strategy_lab
+
+        return strategy_lab.generator_scorecard()
+
+    @beta_tool
     def list_settings() -> str:
         """List the settings that can be changed while LOCKBOT is running,
         their allowed ranges, and which are currently overridden.
@@ -945,6 +1047,8 @@ def build_tools() -> list:
         get_process_status,
         read_project_file,
         remember,
+        propose_strategy,
+        strategy_scorecard,
         list_settings,
         change_setting,
         reset_setting,
