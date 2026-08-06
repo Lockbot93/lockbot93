@@ -484,6 +484,40 @@ NOTIFY_AGENT_CHANNEL = True
 # being able to trade. Filed by LOCKBOT as agent_channel item 46169c86.
 SHADOW_LOG_BLOCKED_SHORTS = True
 
+# ============================================================
+# The research lab's own symbol pool
+#
+# Filed by LOCKBOT as agent_channel item 7425d2f7, and the diagnosis is
+# correct. strategy_lab backtests whatever frames it is handed, and
+# propose_strategy handed it universe.csv -- names filtered to
+# 1.25-3.00%/day movement. The swing horizon scores a 2:1 reward on a 5%
+# stop, so it needs roughly a 10% favourable move inside a trading week.
+# Names SELECTED for low movement cannot deliver that, so every swing
+# backtest was capped by the universe rather than by the rule.
+#
+# Measured: at the swing configuration 83% of entries never touched
+# either band. The test was not measuring entry logic at all.
+#
+# The live universe is deliberately untouched. Its 1.25-3.00% band is
+# right for what it does -- feeding the shadow log, whose population must
+# stay stable while the regime split accumulates toward n~200. Changing
+# it would invalidate 269 logged setups to fix a different problem.
+#
+# The lab pool is built from names the live filter REJECTS as too wild:
+# 95 of the 150-name pre-filter pool, 78 of them inside this band.
+# ============================================================
+
+LAB_UNIVERSE_FILE = PROJECT_FOLDER / "lab_universe.csv"
+
+# Daily ATR band for the lab, as fractions. A rule needing a 10% move in
+# a week is plausible at 3%/day and impossible at 1.5%.
+LAB_MIN_ATR_PERCENT = 0.030
+LAB_MAX_ATR_PERCENT = 0.080
+
+# Cap the pool so a backtest stays affordable. There is no point holding
+# 300 names when a decile is what gets traded.
+LAB_TOP_N = 80
+
 
 # ============================================================
 # OPTIONS TRADING

@@ -1082,7 +1082,27 @@ def build_tools() -> list:
             import lockbot_config as _cfg
             from universe import load_universe
 
-            symbols = load_universe(_cfg.UNIVERSE_FILE)
+            # The LAB pool, not the live one.
+            #
+            # Filed by LOCKBOT as agent_channel 7425d2f7. This read
+            # universe.csv, whose names are filtered to 1.25-3.00% daily
+            # movement because that suits the live scanner. The swing
+            # horizon needs roughly a 10% move inside a week, which
+            # names selected for NOT moving cannot deliver -- 83% of
+            # swing entries never touched either band, so the test was
+            # measuring the universe rather than the rule.
+            #
+            # Falls back to the live universe when the lab pool has not
+            # been built, so this degrades to the old behaviour rather
+            # than failing.
+            import lab_universe
+
+            symbols = lab_universe.load()
+            pool = "lab"
+
+            if not symbols:
+                symbols = load_universe(_cfg.UNIVERSE_FILE)
+                pool = "live (lab pool not built)"
 
             # Depth comes from the horizon. This was 5 days, hardcoded,
             # which is why every proposal on 2026-08-04 returned TOO FEW
@@ -1100,9 +1120,31 @@ def build_tools() -> list:
         verdict, result = strategy_lab.evaluate(spec, frames, horizon=horizon)
         strategy_lab.record_proposal(spec, result, verdict)
 
+        # The pool is reported because WHICH names a rule was scored on
+        # decides whether the score means anything. A swing result from
+        # 1.25-3%/day names is capped by the universe, not by the rule.
+        movement = ""
+
+        try:
+            import lab_universe
+
+            moves = lab_universe.read_movement()
+            tested = [moves[s] for s in frames if s in moves]
+
+            if tested:
+                tested.sort()
+                movement = (f", {tested[0]:.1f}%-{tested[-1]:.1f}%/day, "
+                            f"median {tested[len(tested) // 2]:.1f}%")
+        except Exception:
+            pass
+
         return (
             f"{strategy_lab.describe_spec(spec)}\n\n"
             f"VERDICT: {verdict}\n"
+            f"  horizon {horizon}, held up to "
+            f"{strategy_lab.HORIZONS[horizon]['max_bars_held']} bars, "
+            f"{strategy_lab.HORIZONS[horizon]['stop_percent']:.0%} stop\n"
+            f"  pool {pool}: {len(frames)} symbols{movement}\n"
             f"  trades {result.get('trades')} over {result.get('days')} day(s), "
             f"{result.get('busiest_share', 0):.0%} from the busiest\n"
             f"  win rate {result.get('win_rate', 0):.1%} against a "
