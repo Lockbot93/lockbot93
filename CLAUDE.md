@@ -744,6 +744,47 @@ account cannot support regardless.
 
 Recorded so the idea is not re-proposed as though it were untested.
 
+## Consult LOCKBOT before implementing anything
+
+Standing instruction from the user, 2026-08-06. Not a courtesy — it has
+already changed outcomes.
+
+**Before building, ask it.** Describe the proposal, say plainly that
+nothing is built yet, and invite disagreement. Ask specifically what
+breaks that you have not thought of, and whether it would rather you
+built something else with the same time. Tell it to read the source
+rather than reason from memory.
+
+It sees the running system every day; a session sees a snapshot. On the
+first consultation under this rule — a proposal to compute the ETF
+budget from available cash — it found a defect in the design that would
+have shipped:
+
+> `build_plan` places a sell whenever `held > wanted`. If free cash ever
+> drops below the reserve, `holdings + cash - reserve < holdings`, every
+> sleeve target falls below what is held, and the buy-and-hold book is
+> mechanically liquidated to rebuild an options reserve.
+
+The fix — make the computed budget buy-only with a floor at current
+holdings — came from the consultation, not from me. It also redirected
+priority to a larger risk I had not weighed (the flatten paths ignore
+reserved symbols) and set a reserve figure with its reasoning attached.
+
+### But verify what it tells you
+
+In the same consultation it stated the broker held zero shares of SCHD
+and SCHG. They were held. It had called `equity_positions()` with the
+default, which HIDES reserved symbols by design — the exact trap that
+function creates for any reader who is not the trading engine.
+
+Two readers made that error within a day of each other, so treat it as a
+property of the API rather than a lapse: **anything that is not the
+trading engine must pass `include_reserved=True`.**
+
+So: consult first, act on what survives checking, and check the factual
+claims rather than the reasoning. The reasoning has been consistently
+better than mine. The facts need the same scrutiny as anyone's.
+
 ## Start here: `python agent_channel.py`
 
 **Run it at the start of every session, before anything else.** It prints
