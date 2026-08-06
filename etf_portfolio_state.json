@@ -210,6 +210,17 @@
                 "BUY 1 SCHD @ limit 34.19 -> order fake-order",
                 "BUY 1 SCHG @ limit 35.85 -> order fake-order"
             ]
+        },
+        {
+            "at": "2026-08-06T08:19:33+00:00",
+            "orders": [
+                "buy 1 SCHD",
+                "buy 1 SCHG"
+            ],
+            "results": [
+                "BUY 1 SCHD @ limit 34.19 -> order fake-order",
+                "BUY 1 SCHG @ limit 35.85 -> order fake-order"
+            ]
         }
     ]
 }

@@ -313,6 +313,44 @@ Do not build entry-side features on the current signal. Cost and hazard
 controls (spread, IV, theta, event risk) are still worth having, because
 they reduce what a bad trade costs and do not depend on the signal working.
 
+## VWAP never reset, so backtests tested a different bot (fixed 2026-08-06)
+
+`add_indicators` computed VWAP as a plain `cumsum()` over the whole
+DataFrame, with no session boundary. The indicator therefore meant
+whatever the CALLER's frame length made it mean:
+
+    market_scanner (live)   SCAN_LOOKBACK_DAYS_5M = 3   -> 3-day average
+    backtest.load_history   days=365                    -> 1-year average
+
+So `close > vwap` — one of the five conditions `detect_signal` requires
+— meant "above the 3-day average" in the live scanner and "above the
+YEARLY average" in every backtest. A 120x difference in the same named
+condition.
+
+This directly defeated the design goal stated above: backtest.py imports
+`detect_signal` and `add_indicators` rather than reimplementing them,
+specifically so it tests the bot that trades. It did import them, and
+was still testing a different signal, because frame shape changed what
+the function meant. **Importing the same function is not sufficient for
+fidelity if the function's output depends on how much data you pass it.**
+
+Fixed by grouping the cumulative sums by session date, which is the
+conventional definition and makes the indicator independent of caller
+history. US regular hours never straddle a UTC date change, so the UTC
+date is a correct session key.
+
+Nothing caught this because `indicators.py` had no self-test at all —
+the module every measurement in the project is computed from. It has 21
+checks now, including that VWAP is independent of frame length.
+
+The headline finding was re-measured on the corrected signal and holds:
+
+    live rule      32.9%   -0.01R   p=0.7055   (was 33.8% on broken VWAP)
+    random entry   36.7%   +0.10R   p=0.0002
+
+Marginally worse, still losing to blind entry by 3.8 points, and now
+measured on the signal LOCKBOT actually uses rather than a proxy.
+
 ## r0315: the one that looked real, and how it was killed (2026-08-05)
 
 The search was re-run at POSITION horizon (1560 bars, ~20 days) with the
