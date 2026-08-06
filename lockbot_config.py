@@ -844,9 +844,21 @@ ETF_PORTFOLIO_ENABLED = True
 ETF_PORTFOLIO_LIVE = True
 
 # Hard ceiling on capital committed to the portfolio, in dollars.
-# Deliberately small: at $253 equity with $164 cash, the options side
-# needs room to keep operating while this is evaluated.
-ETF_PORTFOLIO_BUDGET = 100.00
+#
+# Raised from 100 to 160 on 2026-08-05, on a decision to stop funding
+# the trading engine. The reasoning is no longer "leave room for the
+# options side to operate" -- the options side has a measured negative
+# edge and is opening nothing new. It is now simply how much cash is
+# available: $94 idle against $69 already held.
+#
+# NOT raised to cover the whole account, because ~$90 is still committed
+# to two option positions that have not closed. Raise it again as they
+# do, rather than setting a ceiling the account cannot currently fund.
+#
+# Whole shares only, so precision here is theatre: SCHD and SCHG at ~$34
+# mean the sleeve moves in ~$69 steps and $20-30 will always sit
+# unusable. The ceiling is a safety limit, not an allocation target.
+ETF_PORTFOLIO_BUDGET = 160.00
 
 # Target weights. Must sum to 1.0.
 #
