@@ -846,5 +846,244 @@ def run_self_test() -> None:
     print_risk_state()
 
 
+def _self_test() -> int:
+    """Offline checks. Every gate that stands between a signal and an order.
+
+    The existing run_self_test() is a DEMO: it evaluates one request and
+    prints it, against the real risk_state.json. That is useful and is
+    not a test -- it asserts nothing and it mutates live state, which is
+    why this module counted as untested while gating every entry.
+
+    Everything here runs against a temporary state file. A test that can
+    trip the real kill switch is worse than no test.
+    """
+
+    import tempfile
+
+    global RISK_STATE_FILE
+
+    failures: list[str] = []
+
+    def check(name: str, condition: bool, detail: str = "") -> None:
+        if condition:
+            print(f"  PASS  {name}")
+        else:
+            failures.append(name)
+            print(f"  FAIL  {name}" + (f" -- {detail}" if detail else ""))
+
+    real_state = RISK_STATE_FILE
+    RISK_STATE_FILE = Path(tempfile.mkdtemp()) / "risk_state.json"
+
+    def request(**overrides):
+        """A request that passes every gate unless overridden."""
+        base = dict(
+            symbol="TEST",
+            # LONG/SHORT here, NOT the scanner's BUY_LONG/SELL_SHORT.
+            # market_scanner translates at the call site; see the
+            # contract check below, which exists so that translation
+            # cannot be quietly dropped.
+            side="LONG",
+            quantity=1,
+            estimated_entry_price=10.00,
+            estimated_stop_price=9.90,      # 1% stop on a $10 position
+            account_equity=10_000.00,
+            daily_profit_loss=0.00,
+            trades_today=0,
+            open_position_count=0,
+            total_open_exposure=0.00,
+            existing_position_quantity=0.00,
+            duplicate_open_order_exists=False,
+        )
+        base.update(overrides)
+        return TradeRiskRequest(**base)
+
+    try:
+        print("A clean request is approved")
+
+        clean = evaluate_trade_request(request())
+        check("a request breaching nothing is approved",
+              clean.approved is True, clean.reason)
+        check("and says so", clean.decision == "APPROVED")
+        check("position value is computed", clean.position_value == 10.00,
+              str(clean.position_value))
+        check("risk in dollars is entry minus stop, times quantity",
+              abs(clean.estimated_risk_dollars - 0.10) < 1e-9,
+              str(clean.estimated_risk_dollars))
+
+        print()
+        print("Every gate rejects")
+
+        cases = [
+            ("too many open positions",
+             dict(open_position_count=MAX_OPEN_POSITIONS), "open-position"),
+            ("too many trades today",
+             dict(trades_today=MAX_TRADES_PER_DAY), "daily trade count"),
+            ("a duplicate order exists",
+             dict(duplicate_open_order_exists=True), "duplicate"),
+            ("a position already exists on the same side",
+             dict(existing_position_quantity=5), "existing"),
+            ("a conflicting position exists",
+             dict(existing_position_quantity=-5), "conflicting"),
+            ("the position is too large",
+             dict(quantity=10_000), "maximum"),
+            ("the daily loss limit is hit",
+             dict(daily_profit_loss=-10_000 * MAX_DAILY_LOSS_PERCENT),
+             "Daily loss"),
+            ("the stop is too far away",
+             dict(estimated_stop_price=0.01, quantity=100), "risk"),
+        ]
+
+        for name, overrides, expected in cases:
+            decision = evaluate_trade_request(request(**overrides))
+            check(name, decision.approved is False, decision.reason)
+            check(f"  and the reason names it ({expected})",
+                  expected.lower() in decision.reason.lower(),
+                  decision.reason)
+
+        # Exposure is cumulative, so a small trade on top of a nearly
+        # full book must still be refused.
+        crowded = evaluate_trade_request(request(
+            total_open_exposure=10_000 * MAX_TOTAL_EXPOSURE_PERCENT))
+        check("projected exposure counts what is already open",
+              crowded.approved is False, crowded.reason)
+
+        print()
+        print("The boundary is not off by one")
+
+        at_limit = evaluate_trade_request(
+            request(open_position_count=MAX_OPEN_POSITIONS - 1))
+        check("one slot below the cap is allowed",
+              at_limit.approved is True, at_limit.reason)
+
+        one_below = evaluate_trade_request(
+            request(trades_today=MAX_TRADES_PER_DAY - 1))
+        check("one trade below the daily cap is allowed",
+              one_below.approved is True, one_below.reason)
+
+        print()
+        print("The kill switch overrides everything")
+
+        activate_kill_switch("testing")
+        killed = evaluate_trade_request(request())
+        check("an otherwise clean trade is refused",
+              killed.approved is False, killed.reason)
+        check("and the reason is the kill switch",
+              "testing" in killed.reason, killed.reason)
+
+        deactivate_kill_switch()
+        check("deactivating restores trading",
+              evaluate_trade_request(request()).approved is True)
+
+        print()
+        print("The side vocabulary differs from the scanner's, deliberately")
+
+        # This module speaks LONG/SHORT; market_scanner speaks
+        # BUY_LONG/SELL_SHORT and converts at the call site. Asserting
+        # both halves means the conversion cannot be dropped without a
+        # test failing rather than an entry being silently refused.
+        try:
+            evaluate_trade_request(request(side="BUY_LONG"))
+            check("the scanner's vocabulary is rejected here", False,
+                  "BUY_LONG was accepted")
+        except ValueError:
+            check("the scanner's vocabulary is rejected here", True)
+
+        check("LONG is accepted",
+              evaluate_trade_request(request(side="LONG")).approved is True)
+        check("SHORT is accepted",
+              evaluate_trade_request(
+                  request(side="SHORT")).approved is True)
+        check("and case does not matter",
+              evaluate_trade_request(request(side="long")).approved is True)
+
+        scanner = Path("market_scanner.py").read_text(
+            encoding="utf-8", errors="ignore")
+        check("market_scanner still performs the translation",
+              '"LONG" if is_long else "SHORT"' in scanner)
+
+        print()
+        print("Bad input is refused, not guessed at")
+
+        for name, overrides in (
+            ("zero quantity", dict(quantity=0)),
+            ("negative quantity", dict(quantity=-1)),
+            ("zero entry price", dict(estimated_entry_price=0)),
+            ("zero equity", dict(account_equity=0)),
+            ("negative trades_today", dict(trades_today=-1)),
+            ("negative open positions", dict(open_position_count=-1)),
+            ("negative exposure", dict(total_open_exposure=-1)),
+        ):
+            try:
+                evaluate_trade_request(request(**overrides))
+                check(f"{name} raises", False, "it was accepted")
+            except (ValueError, TypeError):
+                check(f"{name} raises", True)
+
+        print()
+        print("Limits come from lockbot_config, not from here")
+
+        check("open positions", MAX_OPEN_POSITIONS == config.MAX_OPEN_POSITIONS)
+        check("trades per day", MAX_TRADES_PER_DAY == config.MAX_TRADES_PER_DAY)
+        check("risk per trade",
+              MAX_RISK_PER_TRADE_PERCENT == config.MAX_RISK_PER_TRADE_PERCENT)
+        check("daily loss", MAX_DAILY_LOSS_PERCENT == config.MAX_DAILY_LOSS_PERCENT)
+        check("exposure",
+              MAX_TOTAL_EXPOSURE_PERCENT == config.MAX_TOTAL_EXPOSURE_PERCENT)
+
+        print()
+        print("State survives a round trip, and corruption does not crash it")
+
+        reset_daily_trade_counter()
+        first = record_trade_submission()
+        second = record_trade_submission()
+        check("submissions increment", second == first + 1,
+              f"{first} then {second}")
+
+        # A corrupt state file RAISES here, and that is correct.
+        #
+        # Falling back to defaults would set kill_switch_active to False
+        # and re-enable trading, so a damaged file would quietly undo an
+        # emergency stop. Refusing to load means refusing to trade,
+        # which is the safe direction for this module.
+        #
+        # Note that options_manager.py deliberately chose the OPPOSITE
+        # for its own state: an unreadable file there continues with no
+        # tracked positions, because failing to run the stop loss is
+        # worse than losing the entry price. Different files, different
+        # safe directions, both on purpose.
+        RISK_STATE_FILE.write_text("{ not json", encoding="utf-8")
+
+        try:
+            load_risk_state()
+            check("a corrupt state file refuses to load", False,
+                  "it returned defaults, which would clear the kill switch")
+        except RuntimeError:
+            check("a corrupt state file refuses to load", True)
+
+        try:
+            evaluate_trade_request(request())
+            check("and no trade is evaluated against unreadable state",
+                  False, "a decision was returned anyway")
+        except RuntimeError:
+            check("and no trade is evaluated against unreadable state", True)
+
+    finally:
+        RISK_STATE_FILE = real_state
+
+    print()
+
+    if failures:
+        print(f"{len(failures)} check(s) FAILED: {', '.join(failures)}")
+        return 1
+
+    print("All risk-manager checks passed.")
+    return 0
+
+
 if __name__ == "__main__":
+    import sys
+
+    if "--self-test" in sys.argv:
+        sys.exit(_self_test())
+
     run_self_test()
