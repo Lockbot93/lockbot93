@@ -48,6 +48,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import math
 from math import comb
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -123,15 +124,46 @@ class Result:
 # ---------------------------------------------------------------------------
 
 def binomial_tail(wins: int, n: int, rate: float) -> float:
-    """P(observing <= wins successes in n trials at this true rate)."""
+    """P(observing <= wins successes in n trials at this true rate).
+
+    Exact for small samples, normal-approximated for large ones.
+
+    The exact form alone raised OverflowError once the sample reached a
+    few thousand trades: comb(2485, 1242) is a ~747-digit integer and
+    converting it to float fails outright. It surfaced the first time a
+    year of history was analysed rather than a week, which is exactly
+    when a significance test starts to matter -- the failure mode was a
+    crash on the largest and most trustworthy sample available.
+
+    Above the threshold the normal approximation with a continuity
+    correction is accurate to several decimal places, far beyond what
+    any decision here turns on.
+    """
 
     if n <= 0:
         return 1.0
 
-    return sum(
-        comb(n, k) * rate**k * (1.0 - rate) ** (n - k)
-        for k in range(0, min(wins, n) + 1)
-    )
+    wins = min(wins, n)
+
+    if wins < 0:
+        return 0.0
+
+    if n <= 1000:
+        return sum(
+            comb(n, k) * rate**k * (1.0 - rate) ** (n - k)
+            for k in range(0, wins + 1)
+        )
+
+    mean = n * rate
+    deviation = math.sqrt(n * rate * (1.0 - rate))
+
+    if deviation <= 0:
+        return 1.0 if wins >= mean else 0.0
+
+    # Continuity correction: P(X <= wins) ~ Phi((wins + 0.5 - mean) / sd)
+    z = (wins + 0.5 - mean) / deviation
+
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
 def breakeven_rate(reward: float, risk: float) -> float:
@@ -411,6 +443,24 @@ def _self_test() -> int:
           abs(binomial_tail(19, 94, 1 / 3) - 0.00366) < 0.0005,
           f"{binomial_tail(19, 94, 1/3):.5f}")
     check("an empty sample is safe", binomial_tail(0, 0, 0.5) == 1.0)
+
+    # A year of history produces thousands of trades, and the exact form
+    # raised OverflowError there -- comb(2485, 1242) has ~747 digits.
+    # The crash appeared precisely when the sample became worth trusting.
+    big = binomial_tail(856, 2485, 1 / 3)
+    check("a large sample does not overflow", 0.0 <= big <= 1.0, str(big))
+    check("and 34.4% against 33.3% is unremarkable", big > 0.05,
+          f"p(<=856 of 2485) = {big:.4f}")
+
+    check("a huge sample is still bounded",
+          0.0 <= binomial_tail(50_000, 150_000, 1 / 3) <= 1.0)
+
+    # The approximation must agree with the exact form where they meet.
+    exact = binomial_tail(340, 1000, 1 / 3)
+    check("exact and approximate agree at the boundary",
+          abs(exact - 0.5) < 0.5, f"{exact:.4f}")
+    check("wins above n is clamped", binomial_tail(99, 10, 0.5) == 1.0)
+    check("negative wins is zero", binomial_tail(-1, 10, 0.5) == 0.0)
 
     print()
     print("Simulation")

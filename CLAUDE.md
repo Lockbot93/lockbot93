@@ -313,6 +313,70 @@ Do not build entry-side features on the current signal. Cost and hazard
 controls (spread, IV, theta, event risk) are still worth having, because
 they reduce what a bad trade costs and do not depend on the signal working.
 
+## The entry rule is worse than buying at random (2026-08-05)
+
+This supersedes everything above about whether the strategy has an edge.
+It is not "the edge is small" or "the sample is thin". It is that the
+signal carries no information and mildly negative selection.
+
+Holding longer looked like it fixed everything. At a 2% stop, over 251
+sessions and 783,508 bars, the live rule improves monotonically as the
+window widens — because 80% of entries were timing out before either
+band was reached, so the bracket was deciding outcomes, not the signal:
+
+    hold      trades  timeout  win rate   avg R
+    1 day       8319      80%     14.5%   -0.57
+    5 days      3295      27%     29.3%   -0.12
+    20 days     2565       3%     34.4%   +0.03   <- clears breakeven
+
+34.4% against a 33.3% breakeven. The first thing all week to clear it.
+
+**It is drift, and the rule is a liability.** 33.3% is not merely the
+breakeven for a 2:1 bracket — it is also the probability a driftless
+random walk touches +4% before −2%. So beating it by a point means
+nothing without a control. Run over identical data and bracket:
+
+    rule             trades   win rate   avg R        p
+    live rule          2485      34.4%   +0.03   0.1238
+    live inverted      2593      32.8%   -0.02   0.7178
+    always long        3082      35.2%   +0.06   0.0159
+    scattered long     2504      35.9%   +0.08   0.0034
+
+**Buying on every bar beats the rule. Entering at random beats it by
+more.** The rule's own p-value is 0.12 — indistinguishable from chance —
+while blind entry clears at p=0.003. Inverting the rule lands near the
+mirror, which is what a signal with no information looks like.
+
+So the positive avg R at 20 days is a rising year, available to anyone
+who bought anything. Selecting entries with these indicators produces a
+result 1.5 points WORSE than not selecting at all.
+
+### What this rules out
+
+Searching for a better rule in this space. It is not that the right
+combination has not been found — 864 were tried and none cleared
+breakeven in training — it is that entry timing on these indicators has
+no information to extract at any holding period tested. A different
+threshold, band or combination cannot fix an input that does not
+predict.
+
+### What it does not rule out
+
+Different inputs entirely (order flow, fundamentals, cross-sectional
+ranking, anything not derived from the same OHLCV bars), or a different
+question than "when to enter" — position sizing, exits, and instrument
+selection are untouched by this. Note also that the thing which DID win
+is buy-and-hold, which is what `etf_portfolio.py` already does and
+which requires no edge at all.
+
+### The benchmark trap this exposed
+
+`rule_search.py` ranked against breakeven, and breakeven is the wrong
+bar in a drifting market. Any long-biased rule clears it in a rising
+year while adding nothing. **Never judge a rule against breakeven
+alone — always against random entry over the same bars.** The controls
+are cheap and they are the difference between a finding and an artifact.
+
 ## Start here: `python agent_channel.py`
 
 **Run it at the start of every session, before anything else.** It prints

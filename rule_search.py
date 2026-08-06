@@ -226,6 +226,44 @@ def generate_candidates() -> list[dict]:
     return specs
 
 
+def control_rules() -> dict[str, Callable]:
+    """Benchmarks a real rule has to beat, not merely breakeven.
+
+    WHY BREAKEVEN IS THE WRONG BAR
+
+    For a 2:1 bracket breakeven is 33.3%, which is ALSO the probability
+    a driftless random walk touches +4% before -2%. In a rising year any
+    long-biased rule clears it while contributing nothing, so a search
+    ranked on breakeven alone reports drift as an edge.
+
+    Measured on 2026-08-05 over 251 sessions: the live rule scored 34.4%
+    and cleared breakeven. Buying on EVERY bar scored 35.2%, and
+    entering at random scored 35.9%. The rule was 1.5 points worse than
+    not choosing at all, and had looked like a success.
+
+    These run alongside every search so the real bar is visible in the
+    same report.
+    """
+
+    def always_long(row, trend):
+        """Pure drift. Whatever the market did, with no selection."""
+        return "BUY_LONG"
+
+    def scattered_long(row, trend):
+        """Random-ish entry, deterministic so results reproduce.
+
+        Keyed off the bar's own digits rather than a random number
+        generator, which keeps a resumed or repeated run identical.
+        """
+        key = int(abs(row["close"]) * 1000) + int(abs(row["rsi"]) * 10)
+        return "BUY_LONG" if key % 40 == 0 else "NO_TRADE"
+
+    return {
+        "__control_always_long": always_long,
+        "__control_random_entry": scattered_long,
+    }
+
+
 def compile_all(specs: list[dict]) -> dict[str, Callable]:
     """Compile specs to rules, dropping any that will not validate."""
 
@@ -327,9 +365,25 @@ def search(
         return chosen, stats
 
     print(f"\nHolding out {len(test)} symbols. Measuring {len(chosen)} "
-          f"finalist(s) once.")
+          f"finalist(s) once, against random-entry controls.")
 
     finalist_rules = {f.spec["name"]: rules[f.spec["name"]] for f in chosen}
+
+    # The controls run on the HOLDOUT, beside the finalists, on identical
+    # bars. A finalist that cannot beat blind entry here has found the
+    # market going up, not an edge.
+    control_results = run_rules(
+        test, control_rules(), stop_percent=stop_percent,
+        reward_ratio=reward_ratio, max_bars_held=max_bars_held,
+    )
+
+    stats["controls"] = {}
+
+    for result in control_results:
+        trades, win_rate, expectancy = summarise(result)
+        stats["controls"][result.name.replace("__control_", "")] = {
+            "trades": trades, "win_rate": win_rate, "expectancy": expectancy,
+        }
 
     test_results = run_rules(
         test, finalist_rules, stop_percent=stop_percent,
@@ -417,6 +471,39 @@ def report(findings: list[Finding], stats: dict, *, reward_ratio: float) -> None
         )
 
     survivors = [f for f in findings if f.verdict == "SURVIVED"]
+
+    # The real bar. Breakeven is what a rule must clear to not lose
+    # money; the controls are what it must clear to have contributed
+    # anything, and in a rising market those are very different numbers.
+    controls = stats.get("controls") or {}
+
+    if controls:
+        print()
+        print("=" * 72)
+        print("CONTROLS — the bar that actually matters, same holdout bars")
+        print("=" * 72)
+
+        for name, data in sorted(controls.items()):
+            print(f"  {name:<16} {data['trades']:>5} trades  "
+                  f"{data['win_rate']:>6.1%}  {data['expectancy']:>+6.2f}R")
+
+        best_control = max(
+            (d["win_rate"] for d in controls.values()), default=0.0)
+
+        print()
+        print(f"  A rule must beat {best_control:.1%}, not {breakeven:.1%}.")
+        print("  Breakeven is also what a random walk scores, so clearing it")
+        print("  in a rising year proves only that the year rose.")
+
+        beaten = [f for f in survivors if f.test_win_rate > best_control]
+
+        if survivors and not beaten:
+            print()
+            print("  NOTE: every surviving rule scored at or below blind")
+            print("  entry. They cleared significance against breakeven and")
+            print("  still added nothing. Treat them as drift.")
+
+        survivors = beaten
 
     print()
     print("=" * 72)
@@ -593,6 +680,34 @@ def _self_test() -> int:
     short = {"A": frame(2)}
     _, held, _ = split_by_session(short)
     check("too little history yields no holdout", held == {})
+
+    print()
+    print("Controls, because breakeven is not the bar")
+
+    controls = control_rules()
+    check("blind entry is one of them", "__control_always_long" in controls)
+    check("random entry is another", "__control_random_entry" in controls)
+
+    row = {"close": 20.0, "rsi": 55.0}
+    check("always-long always enters",
+          controls["__control_always_long"](row, "BULLISH") == "BUY_LONG")
+    check("and does not care about trend",
+          controls["__control_always_long"](row, "BEARISH") == "BUY_LONG")
+
+    # Deterministic, so a repeated or resumed run gives the same answer.
+    first = [controls["__control_random_entry"](
+        {"close": 20.0 + i / 100, "rsi": 55.0}, "BULLISH") for i in range(400)]
+    second = [controls["__control_random_entry"](
+        {"close": 20.0 + i / 100, "rsi": 55.0}, "BULLISH") for i in range(400)]
+
+    check("random entry is reproducible", first == second)
+
+    entries = sum(1 for s in first if s == "BUY_LONG")
+    check("it enters sometimes but not always", 0 < entries < 400,
+          f"{entries}/400")
+
+    check("controls are named so they cannot be mistaken for proposals",
+          all(name.startswith("__control_") for name in controls))
 
     print()
     print("The null is computed, not asserted")
