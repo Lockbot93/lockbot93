@@ -245,6 +245,39 @@ becomes serious, size matters more than code.
 
 ---
 
+## The bar for any new idea
+
+On 6 August I asked LOCKBOT directly whether it had any remaining ideas for
+making the engine profitable. It said no — and instead of a hypothesis it
+proposed a standard, which is more useful.
+
+**An idea is only worth testing if all three hold:**
+
+**(a) It uses information that isn't already in the price bars.**
+Every indicator LOCKBOT has — moving averages, RSI, MACD, VWAP — is just
+arithmetic on the same price and volume numbers. 864 combinations of them
+found nothing, because you can't extract more information than the input
+contains. "Try a different indicator" fails immediately. Earnings dates,
+order flow, or company fundamentals would pass.
+
+**(b) It works across separate YEARS, not just separate stocks.**
+Testing on different companies in the same year isn't independent proof —
+same market, same conditions. This is the r0315 lesson: it beat the controls,
+replicated perfectly on 40 completely different large companies, and then
+turned out to work only in the year it was found.
+
+**(c) It beats picking at random, not just "break even."**
+Break-even for these brackets is 33.3% — which is exactly what random
+guessing scores. In a rising market anything long clears it while adding
+nothing. Today's universe fix took the win rate from 9.4% to 25.1%, which
+looks like a triumph, until you see random entry went 11.6% to 27.9% on the
+same data. The gap got *worse*.
+
+**Why this matters:** it isn't pessimism, it's a checklist. It says exactly
+what would change the answer. Nothing available on your current data
+subscription passes (a) and (b) at the same time — that's a specific missing
+thing, not a verdict on trading in general.
+
 ## If you come back to this
 
 Three things I'd revisit, in order:

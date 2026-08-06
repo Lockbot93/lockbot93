@@ -245,6 +245,64 @@ The lesson is not about targets. It is that "many small losses, few huge
 wins" requires the huge wins to be reachable, and on this universe and
 holding period they are not.
 
+## THE BAR: what a new strategy idea must clear before it is worth testing
+
+Set by LOCKBOT on 2026-08-06, when asked directly whether it had any
+remaining ideas and answered no. It proposed a standard instead of a
+hypothesis, and the standard is better than a hypothesis would have been.
+
+Everything below this section is a record of ten strategy families that
+were tested and lost. Read the bar first; it is what stops an eleventh
+from being started on the same footing.
+
+**An idea is only worth testing if all three hold.**
+
+### (a) It uses an input not derived from these OHLCV bars
+
+Every indicator available — EMA, RSI, MACD, VWAP, ATR — is a
+transformation of the same price and volume series. Smoothings and
+ratios of numbers already in hand.
+
+864 combinations of them cleared nothing. That is not bad luck: you
+cannot extract more information than the input contains. "Try a
+different indicator" fails here immediately. Earnings dates, order
+flow, fundamentals, short interest would pass.
+
+### (b) It is testable across separate YEARS, not just separate symbols
+
+Different stocks in the same period is not independent evidence. Same
+regime, same macro, same year.
+
+r0315 is why. It beat the controls by 6.4 points on held-out data, then
+replicated almost exactly on 40 mega-caps that share none of the
+original universe — and scored +0.1%, -0.3%, -0.3% across 2022, 2023
+and 2024. It worked only in the year it was discovered, and the
+cross-symbol replication was convincing enough to have justified
+trading it.
+
+### (c) It beats RANDOM ENTRY, not breakeven
+
+For a 2:1 bracket, breakeven is 33.3% — which is also what a driftless
+random walk scores. In a rising year every long-biased rule clears it
+while contributing nothing.
+
+The lab universe change on 2026-08-06 is the cleanest illustration:
+win rates went from 9.4% to 25.1%, a 167% improvement and a very
+persuasive number. Random entry on identical bars went 11.6% to 27.9%.
+The gap WIDENED. Without the control that reads as a breakthrough.
+
+### Why this is a gate and not a mood
+
+It is falsifiable and it names what would change the answer. It does
+not say nothing can work; it says nothing available on this
+subscription clears (a) and (b) simultaneously. If a data source is
+ever added that is not derived from price bars, (a) opens — and the
+illiquidity result is the one thing worth reopening, with a real spread
+model attached.
+
+Do not propose work that fails this bar, and do not let a persuasive
+in-sample number substitute for it.
+
 ## What the evidence currently says about the strategy
 
 Read this before building anything intended to improve returns.
