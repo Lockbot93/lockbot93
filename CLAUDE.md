@@ -45,8 +45,11 @@ result carries its day count and single-session concentration, because
 ninety trades from one afternoon is one observation. `signal_research.py`
 does the same for the live rule's own logged setups.
 
-The empty `ai/`, `broker/`, `config/`, `execution/`, `strategy/`, `tests/`
-directories are unused scaffolding. The real layout is flat.
+The layout is flat. Twelve empty scaffolding directories (`ai/`, `broker/`,
+`config/`, `data/`, `execution/`, `indicators/`, `journal/`, `logs/`, `risk/`,
+`scanner/`, `strategy/`, `tests/`) were removed on 2026-08-06 — nothing
+referenced any of them, and `indicators/` sitting beside `indicators.py` was
+an import ambiguity waiting to happen.
 
 ## Invariants — do not break these casually
 
@@ -94,15 +97,20 @@ Equity: `position_state.json`, `lockbot_pending_trades.csv`,
 Options keep their own, deliberately separate: `options_position_state.json`,
 `options_risk_state.json`, `options_completed_trades.csv`,
 `options_shadow_log.csv`. Options P&L is kept out of the equity performance
-files so the two strategies can be judged independently — which does mean
-`daily_report.py` does not yet include options.
+files so the two strategies can be judged independently.
+
+`daily_report.py` reports all three books separately: equity from the
+journal, options from their own files, and the buy-and-hold portfolio read
+live from the broker. That last one has no journal by design — it produces no
+completed trades — and `position_filters` hides it from the trading engine, so
+a report built from trades alone would never have mentioned the sleeve now
+holding most of the account.
 
 Paths live in `lockbot_config.py` — read them from there, never hardcode.
 
-Note the `*_OLD`, `*_backup`, `*_v0_N` files scattered through the root. They
-are dead copies, not imports. `market_scanner.py` is live;
-`market_scanner_OLD.py`, `market_scanner_refracted,py` (sic) and the rest are
-not.
+The `*_OLD`, `*_backup` and `*_v0_N` dead copies this file used to warn about
+are gone — git holds the history now, which is what they were standing in for.
+Verified absent 2026-08-06.
 
 ## Known constraints
 

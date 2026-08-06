@@ -363,6 +363,75 @@ def build_options_section(report_date: date) -> str:
     return "\n".join(lines)
 
 
+def build_portfolio_section() -> str:
+    """The buy-and-hold book, which the trading sections cannot see.
+
+    position_filters hides reserved ETF symbols from the trading engine
+    on purpose, and that hiding reaches the report too: a daily summary
+    built from completed TRADES will never mention a position that is
+    never traded.
+
+    As of 2026-08-06 the ETF sleeve holds more of the account than the
+    trading strategy does, so a report that omits it describes the
+    smaller half. Reads the broker rather than a journal, because
+    buy-and-hold produces no journal entries by design.
+    """
+
+    try:
+        import lockbot_config as config
+
+        if not getattr(config, "ETF_PORTFOLIO_ENABLED", False):
+            return ""
+
+        import os
+
+        from alpaca.trading.client import TradingClient
+        from dotenv import load_dotenv
+
+        from position_filters import reserved_symbols
+
+        load_dotenv()
+
+        client = TradingClient(
+            os.getenv(config.ALPACA_API_KEY_ENV),
+            os.getenv(config.ALPACA_SECRET_KEY_ENV),
+            paper=config.PAPER_TRADING,
+        )
+
+        reserved = reserved_symbols()
+        held = [
+            position for position in client.get_all_positions()
+            if str(getattr(position, "symbol", "")).upper() in reserved
+        ]
+
+        if not held:
+            return "\n\nPortfolio\nNothing held yet."
+
+        value = sum(float(p.market_value) for p in held)
+        cost = sum(float(p.cost_basis) for p in held)
+        pnl = value - cost
+
+        lines = ["", "", "Portfolio (buy and hold)"]
+
+        for position in sorted(held, key=lambda p: p.symbol):
+            lines.append(
+                f"  {position.symbol} x{position.qty} "
+                f"${float(position.market_value):,.2f} "
+                f"({float(position.unrealized_plpc) * 100:+.2f}%)"
+            )
+
+        lines.append(f"Value: ${value:,.2f}  "
+                     f"P/L: {_format_money(pnl)}")
+
+        return "\n".join(lines)
+
+    except Exception as error:
+        # Never let the portfolio lookup break the report. The trading
+        # numbers matter more and this is the only section needing the
+        # broker.
+        return f"\n\nPortfolio\nUnavailable: {type(error).__name__}"
+
+
 def build_daily_report_message(
     *,
     report_date: date,
@@ -376,6 +445,7 @@ def build_daily_report_message(
     # trades says nothing about options, and for most of the last week
     # options were the only thing trading at all.
     options_section = build_options_section(report_date)
+    portfolio_section = build_portfolio_section()
 
     if not daily_trades:
         return (
@@ -394,6 +464,7 @@ def build_daily_report_message(
             f"Estimated equity: "
             f"${overall_stats.estimated_current_equity:,.2f}\n"
             f"{options_section}"
+            f"{portfolio_section}"
         )
 
     best_trade = max(
@@ -447,6 +518,7 @@ def build_daily_report_message(
         f"Estimated equity: "
         f"${overall_stats.estimated_current_equity:,.2f}\n"
         f"{options_section}"
+        f"{portfolio_section}"
     )
 
 
