@@ -732,6 +732,16 @@ Write the regression test first and watch it fail. The existing
 A REOPENED item is the most urgent thing on the board: something is on record
 as done while the problem is still live.
 
+## `WHAT_WE_LEARNED.md` is the human-facing version
+
+This file is written for you, an AI, and is loaded every session: dense,
+repetitive, restating conclusions so they cannot be missed. That makes it
+unreadable as a document for the person who owns the project.
+
+`WHAT_WE_LEARNED.md` covers the same findings in plain English, in order,
+for someone re-reading in a month. Keep the two in step — when a finding
+here changes, change it there. Do not write a second copy of it.
+
 ## Conventions
 
 Module docstrings explain **why**, not just what, and record the bug that
