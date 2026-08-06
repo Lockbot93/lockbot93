@@ -517,11 +517,28 @@ def handle_message(
     try:
         import lockbot_brain
 
-        # Belt and braces. The brain's trading tools are already excluded
-        # from a remote session, and this makes them refuse even if one
-        # were reachable some other way.
+        # READ_ONLY is the money wall and stays up: every tool that can
+        # place an order refuses in a remote session, regardless of what
+        # is asked or how convincingly.
         lockbot_brain.READ_ONLY = True
-        lockbot_brain.CONFIRM = lambda *_: False
+
+        # The confirmation handler is a DIFFERENT question, and refusing
+        # everything here was wrong.
+        #
+        # CONFIRM exists for the interactive console, where a person
+        # types y/n at a prompt. There is no prompt over Telegram -- the
+        # user's message IS the authorisation, and /flatten carries its
+        # own challenge for the one destructive thing that is allowed.
+        # Refusing unconditionally therefore blocked nothing dangerous
+        # and blocked everything useful: on 2026-08-06 the controller sat
+        # down for eight hours while LOCKBOT could see it in
+        # get_process_status and could not restart it.
+        #
+        # With the guard split by places_orders, approving here permits
+        # operational recovery -- restart, cleanup, rebuild the universe,
+        # force an options-manager pass -- while READ_ONLY still refuses
+        # anything that moves money.
+        lockbot_brain.CONFIRM = lambda *_: True
 
         if command == "brief":
             reply = lockbot_brain.brief(send=False)
@@ -874,6 +891,42 @@ def _self_test() -> int:
     check_that("no broker was contacted", "test double" in reply, reply[:80])
 
     _PENDING_FLATTEN.clear()
+
+    print()
+    print("A remote session can recover the system but cannot spend money")
+
+    import lockbot_brain as _brain
+
+    _real_ro, _real_confirm = _brain.READ_ONLY, _brain.CONFIRM
+
+    try:
+        # Exactly what handle_message sets before reaching the brain.
+        _brain.READ_ONLY = True
+        _brain.CONFIRM = lambda *_: True
+
+        for label, kwargs in (
+            ("closing a position", {"places_orders": True}),
+            ("liquidating everything", {"places_orders": True}),
+            ("submitting a trade", {"places_orders": True}),
+        ):
+            refusal = _brain._guard("TEST", label, **kwargs)
+            check_that(f"{label} is refused remotely",
+                       refusal is not None and "read-only" in refusal,
+                       str(refusal))
+
+        for label in ("restarting the controller", "running the shadow "
+                      "resolver", "rebuilding the universe"):
+            refusal = _brain._guard("TEST", label, places_orders=False)
+            check_that(f"{label} is permitted remotely",
+                       refusal is None or "kill switch" in refusal,
+                       str(refusal))
+
+        # The one operational action that is really a safety action.
+        check_that("stopping the controller counts as order-placing",
+                   "options" not in _brain.ORDER_CAPABLE_COMPONENTS)
+
+    finally:
+        _brain.READ_ONLY, _brain.CONFIRM = _real_ro, _real_confirm
 
     print()
     print("Conversation memory")

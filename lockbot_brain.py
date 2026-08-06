@@ -503,20 +503,51 @@ def _trading_client():
     return TradingClient(api_key, secret_key, paper=config.PAPER_TRADING)
 
 
-def _guard(action: str, detail: str) -> str | None:
+# Components that can put an order on the wire.
+#
+# market_scanner is the only module that SUBMITS entries, options_scanner
+# submits option entries, and rearm places bracket orders. Everything
+# else reads, reconciles, journals or rebuilds a file.
+#
+# options_manager is deliberately NOT here even though it sells: it is
+# the only stop loss open contracts have, so being able to run it
+# unattended is a safety feature rather than a risk.
+ORDER_CAPABLE_COMPONENTS = {"scanner", "options_scan", "rearm"}
+
+
+def _guard(action: str, detail: str, *, places_orders: bool = True) -> str | None:
     """
     Run every check that stands between a request and an order.
 
-    Returns None when the trade may proceed, or the refusal text to hand
+    Returns None when the action may proceed, or the refusal text to hand
     back to the model.
+
+    WHY THIS TAKES A places_orders FLAG
+
+    It used to refuse everything in a read-only session, which meant
+    "rebuild universe.csv" and "liquidate the account" were gated
+    identically. On 2026-08-06 the controller was found down for eight
+    hours; LOCKBOT could see it in get_process_status and could do
+    nothing, because restarting a process was blocked by the same check
+    that blocks placing trades.
+
+    Those risks are not comparable. An operational action restores
+    service and is reversible; an order moves money and is not. So a
+    read-only session now refuses the second and permits the first.
+
+    The kill switch and the confirmation handler still apply to both.
+    Read-only is about money, not about obedience.
     """
 
     import lockbot_config as config
 
-    if READ_ONLY:
+    if READ_ONLY and places_orders:
         return (
-            "REFUSED: this session is read-only. Trading tools are disabled. "
-            "Restart without --read-only to place orders."
+            "REFUSED: this session is read-only. Anything that can place an "
+            "order is disabled. Operational actions -- restarting the "
+            "controller, running a component that cannot submit, rebuilding "
+            "the universe -- are still available. Restart without "
+            "--read-only to place orders."
         )
 
     risk_state = _read_json(config.RISK_STATE_FILE, {}) or {}
@@ -1302,10 +1333,16 @@ def build_tools() -> list:
         """CONTROLS THE RUNNING SYSTEM. Start, stop or restart the LOCKBOT
         controller, or clear out stale sessions.
 
-        Stopping the controller also stops options_manager.py, which is the
-        ONLY stop loss open option positions have — Alpaca provides no bracket
-        for contracts. The stop is refused while options are open unless the
-        user explicitly insists.
+        start, restart and cleanup work even in a read-only session. They
+        restore service and cannot place an order, so if you find the
+        controller down — get_process_status will tell you — fix it rather
+        than reporting it and waiting. On 2026-08-06 it sat down for eight
+        hours because this was gated with the trading tools.
+
+        stop is different and stays restricted. It ends options_manager.py,
+        which is the ONLY stop loss open option positions have — Alpaca
+        provides no bracket for contracts. Refused while options are open
+        unless the user explicitly insists.
 
         Args:
             action: One of "start", "stop", "restart", "cleanup".
@@ -1332,7 +1369,15 @@ def build_tools() -> list:
             "cleanup": "End stale brain/HUD/Telegram sessions (no positions affected)",
         }[action]
 
-        refusal = _guard(f"{action.upper()} LOCKBOT", detail)
+        # start, restart and cleanup RESTORE service and place nothing.
+        # stop is different in kind: it ends options_manager, which is the
+        # only stop loss open contracts have, so it stays behind the
+        # read-only wall with the order-placing tools.
+        refusal = _guard(
+            f"{action.upper()} LOCKBOT",
+            detail,
+            places_orders=(action == "stop"),
+        )
 
         if refusal:
             return refusal
@@ -1352,8 +1397,16 @@ def build_tools() -> list:
     def run_lockbot_component(name: str) -> str:
         """Run one LOCKBOT component once, right now, and report the result.
 
-        Useful for forcing a scan, rebuilding the universe, resolving shadow
-        trades, or re-arming brackets without waiting for the next cycle.
+        Most of these work in a read-only session because they cannot
+        submit anything: manager, monitor, health, universe, volatility,
+        shadow, and options (options_manager, which is the stop loss —
+        forcing a pass is a safety action, not a risk).
+
+        Three are gated with the trading tools because they CAN place
+        orders: scanner, options_scan, rearm.
+
+        Use it to force a scan, rebuild the universe, resolve shadow
+        trades, or re-check option stops without waiting for the cycle.
 
         Args:
             name: One of scanner, manager, monitor, health, options,
@@ -1362,10 +1415,21 @@ def build_tools() -> list:
 
         from lockbot_process import COMPONENTS, run_component
 
-        if name.strip().lower() not in COMPONENTS:
+        name = name.strip().lower()
+
+        if name not in COMPONENTS:
             return f"Unknown component. Choose from: {', '.join(sorted(COMPONENTS))}"
 
-        refusal = _guard("RUN COMPONENT", f"Run {name} once now")
+        # Only the three that can submit are gated as order-placing.
+        # Running the shadow resolver, rebuilding the universe or forcing
+        # an options-manager pass are operational and available in a
+        # read-only session -- the last one especially, since it IS the
+        # stop loss.
+        refusal = _guard(
+            "RUN COMPONENT",
+            f"Run {name} once now",
+            places_orders=name in ORDER_CAPABLE_COMPONENTS,
+        )
 
         if refusal:
             return refusal
@@ -2341,6 +2405,49 @@ def _self_test() -> int:
         "default confirm handler refuses",
         _default_confirm("TEST", "test") is False,
     )
+
+    # ---- read-only is about MONEY, not about obedience
+    #
+    # It used to refuse everything, so "rebuild universe.csv" and
+    # "liquidate the account" were gated identically. The controller sat
+    # down for eight hours on 2026-08-06 because restarting a process
+    # was blocked by the check that blocks trading.
+    READ_ONLY = True
+    CONFIRM = lambda *_: True  # noqa: E731
+
+    refusal = _guard("TEST", "test", places_orders=True)
+    check("read-only still refuses anything that places an order",
+          refusal is not None and "read-only" in refusal)
+
+    refusal = _guard("TEST", "test", places_orders=False)
+    check("but permits operational actions",
+          refusal is None or "kill switch" in refusal, str(refusal))
+
+    check("places_orders defaults to True, so a new tool is safe by default",
+          _guard("TEST", "test") is not None)
+
+    # The confirmation handler must still apply to operational actions --
+    # read-only is not a licence to act unasked.
+    CONFIRM = lambda *_: False  # noqa: E731
+    refusal = _guard("TEST", "test", places_orders=False)
+    check("a declined confirmation still refuses an operational action",
+          refusal is not None and "declined" in refusal, str(refusal))
+
+    check("the order-capable component list names only submitters",
+          ORDER_CAPABLE_COMPONENTS == {"scanner", "options_scan", "rearm"},
+          str(ORDER_CAPABLE_COMPONENTS))
+
+    check("options_manager is NOT gated -- it is the stop loss",
+          "options" not in ORDER_CAPABLE_COMPONENTS)
+
+    try:
+        from lockbot_process import COMPONENTS
+
+        check("every gated component actually exists",
+              ORDER_CAPABLE_COMPONENTS <= set(COMPONENTS),
+              str(ORDER_CAPABLE_COMPONENTS - set(COMPONENTS)))
+    except ImportError:
+        check("lockbot_process importable", False)
 
     CONFIRM = original_confirm
     READ_ONLY = False
