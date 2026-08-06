@@ -469,6 +469,26 @@ market:
 Ranking lost to not ranking by 2.3 points a year, with a worse Sharpe
 and a deeper drawdown. Holding the index beat every variant.
 
+**Re-run at real breadth, because nine ETFs is not the strategy.** The
+published work ranks hundreds of individual stocks and holds a decile;
+breadth is the mechanism, not a detail. Enumerated 10,918 tradable US
+equities, sampled 2,500 across the alphabet, kept the 740 with full
+history and median dollar volume above $3M. Same rules, 910 sessions:
+
+    momentum top 74           +24.0% CAGR   Sharpe 0.88   maxDD -27.5%
+    equal weight (control)    +37.0% CAGR   Sharpe 1.23   maxDD -20.6%
+    bottom 74 (inverse)       +88.1% CAGR   Sharpe 0.65   maxDD -26.1%
+
+Ranking lost by 13 points a year. At nine ETFs it lost by 2.3; at 740
+names it lost by 13. **Breadth made it worse, not better.**
+
+The inverse row is NOT a finding and must not be read as one. Every
+symbol is listed today, so stocks that collapsed and recovered are in
+the sample while those that went to zero are deleted. "Buy the losers"
+is measuring the deletion. Survivorship inflates all three rows, which
+is what makes the negative result decisive: momentum cannot beat equal
+weight even with the failures removed from history in its favour.
+
 That is four families now — entry rules, holding horizons, variance
 premium, cross-sectional momentum — each tested against a control, each
 losing to doing nothing. Do not re-propose any of them as untested.
