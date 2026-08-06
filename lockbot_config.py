@@ -834,10 +834,22 @@ NOTIFY_REPEAT_COOLDOWN_MINUTES = 120
 # changed deliberately.
 # Enabled 2026-08-04, for a bounded purpose: verifying the plumbing, not
 # testing whether broad ETFs go up. That question does not need a paper
-# account. What does need checking is whether the reserved-symbol
-# mechanism holds against a REAL holding — it has only ever been tested
-# against synthetic positions, and this week produced four separate bugs
-# that passed their tests and failed in reality.
+# account.
+#
+# VERIFIED 2026-08-06 against real holdings, which is what it was
+# enabled to establish. With SCHD and SCHG genuinely held at the broker:
+#
+#   broker returns          5 positions (2 ETF shares, 3 option legs)
+#   equity the engine sees  []
+#   equity in total         [SCHD, SCHG]
+#   options                 [3 legs]
+#
+# Nothing is lost between the filters, option legs are not counted as
+# equity, and the ETF book consumes zero trading slots. That last one
+# was load-bearing: MAX_OPEN_POSITIONS is 2, so without the filter these
+# two holdings would have occupied every slot and silently blocked all
+# equity trading. position_filters.py now has 19 self-test checks
+# covering it.
 ETF_PORTFOLIO_ENABLED = True
 
 # When False the module reports what it WOULD do and places nothing.

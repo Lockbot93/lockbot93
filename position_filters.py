@@ -115,15 +115,38 @@ def option_positions(positions: Any) -> list:
     ]
 
 
-if __name__ == "__main__":
-    class _Fake:
-        def __init__(self, symbol, asset_class):
-            self.symbol = symbol
-            self.asset_class = asset_class
+class _Fake:
+    """A position object shaped like Alpaca's, for tests."""
 
-    class _Enum:
-        def __init__(self, value):
-            self.value = value
+    def __init__(self, symbol, asset_class):
+        self.symbol = symbol
+        self.asset_class = asset_class
+
+
+class _Enum:
+    """Alpaca returns enums whose .value holds the string."""
+
+    def __init__(self, value):
+        self.value = value
+
+
+def _self_test() -> int:
+    """Offline checks. This module enforces two separation invariants.
+
+    It had asserts in a __main__ block but no --self-test, so it never
+    ran with the suite -- while being the module that keeps option
+    contracts out of the equity tracker and buy-and-hold ETFs out of the
+    trading engine's sight.
+    """
+
+    failures: list[str] = []
+
+    def check(name: str, condition: bool, detail: str = "") -> None:
+        if condition:
+            print(f"  PASS  {name}")
+        else:
+            failures.append(name)
+            print(f"  FAIL  {name}" + (f" -- {detail}" if detail else ""))
 
     sample = [
         _Fake("NVO", "us_equity"),
@@ -133,14 +156,110 @@ if __name__ == "__main__":
         _Fake("LEGACY", None),
     ]
 
+    print("Equities and options never mix")
+
     equities = [p.symbol for p in equity_positions(sample)]
     options = [p.symbol for p in option_positions(sample)]
 
-    assert equities == ["NVO", "LVS", "LEGACY"], equities
-    assert options == ["EWZ260821C00036000", "SPY260821P00450000"], options
-    assert equity_positions(None) == []
-    assert option_positions([]) == []
+    check("shares are returned as equity",
+          equities == ["NVO", "LVS", "LEGACY"], str(equities))
+    check("contracts are returned as options",
+          options == ["EWZ260821C00036000", "SPY260821P00450000"],
+          str(options))
+    check("an enum asset_class is unwrapped",
+          "LVS" in equities and "SPY260821P00450000" in options)
+    check("a missing asset_class is treated as equity",
+          "LEGACY" in equities)
 
-    print("position_filters checks passed.")
-    print(f"  equities: {equities}")
-    print(f"  options : {options}")
+    # The property that matters: nothing may be invisible to BOTH
+    # filters. A position neither path can see is one nobody manages.
+    seen = set(equities) | set(options)
+    check("no position is invisible to both filters",
+          seen == {p.symbol for p in sample},
+          str({p.symbol for p in sample} - seen))
+    check("and none is claimed by both",
+          not (set(equities) & set(options)))
+
+    print()
+    print("The ETF book is hidden from the trading engine")
+
+    import lockbot_config as config
+
+    original = getattr(config, "ETF_TARGET_ALLOCATION", None)
+    config.ETF_TARGET_ALLOCATION = {"SCHG": 0.5, "SCHD": 0.5}
+
+    try:
+        book = sample + [_Fake("SCHD", "us_equity"), _Fake("SCHG", "us_equity")]
+
+        visible = [p.symbol for p in equity_positions(book)]
+        check("reserved ETFs are hidden by default",
+              "SCHD" not in visible and "SCHG" not in visible, str(visible))
+        check("while real trading positions stay visible",
+              "NVO" in visible and "LVS" in visible)
+
+        everything = [p.symbol for p in equity_positions(
+            book, include_reserved=True)]
+        check("include_reserved shows them again",
+              "SCHD" in everything and "SCHG" in everything)
+
+        check("reserved symbols come from config",
+              reserved_symbols() == {"SCHG", "SCHD"},
+              str(reserved_symbols()))
+
+        # Case matters: the broker returns upper case, a config might not.
+        config.ETF_TARGET_ALLOCATION = {"schd": 1.0}
+        check("reserving is case-insensitive",
+              "SCHD" not in [p.symbol for p in equity_positions(book)])
+
+        # An option that happens to be ON a reserved underlying must NOT
+        # be hidden -- it is a trade, not a holding.
+        config.ETF_TARGET_ALLOCATION = {"SCHD": 1.0}
+        with_option = [_Fake("SCHD260821C00035000", "us_option")]
+        check("an option on a reserved underlying is still a trade",
+              len(option_positions(with_option)) == 1)
+
+        config.ETF_TARGET_ALLOCATION = {}
+        check("no allocation means nothing is reserved",
+              reserved_symbols() == set())
+        check("and every share is visible again",
+              "SCHD" in [p.symbol for p in equity_positions(book)])
+
+    finally:
+        if original is None:
+            delattr(config, "ETF_TARGET_ALLOCATION")
+        else:
+            config.ETF_TARGET_ALLOCATION = original
+
+    print()
+    print("Nothing here may raise")
+
+    check("None is safe", equity_positions(None) == []
+          and option_positions(None) == [])
+    check("an empty list is safe", equity_positions([]) == []
+          and option_positions([]) == [])
+    check("an object with no attributes at all is not an option",
+          option_positions([object()]) == [])
+    check("and is treated as equity",
+          len(equity_positions([object()])) == 1)
+
+    check("asset_class_of handles anything",
+          asset_class_of(_Fake("X", None)) == ""
+          and asset_class_of(_Fake("X", "US_EQUITY")) == "us_equity")
+
+    print()
+
+    if failures:
+        print(f"{len(failures)} check(s) FAILED: {', '.join(failures)}")
+        return 1
+
+    print("All position-filter checks passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--self-test" in sys.argv:
+        sys.exit(_self_test())
+
+    print(__doc__)
