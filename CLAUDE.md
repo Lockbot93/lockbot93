@@ -377,6 +377,33 @@ year while adding nothing. **Never judge a rule against breakeven
 alone — always against random entry over the same bars.** The controls
 are cheap and they are the difference between a finding and an artifact.
 
+### The obvious structural alternative was also tested (2026-08-05)
+
+Having ruled out entry prediction, the next candidate was a structural
+edge needing no forecast: the variance risk premium, where implied
+volatility sits reliably above realised. It is among the most durable
+documented effects in finance, and LOCKBOT had already flagged 1.83x on
+a single PCG contract.
+
+It is not present here. Across 30 universe names, near-the-money, 21-45
+DTE:
+
+    median IV / realised   0.97
+    above 1.0              13/30 = 43%
+    mean                   1.10   (WBD 3.93 and PCG 1.92 carry it)
+
+Roughly fair. The mean is an artefact of two event-driven names, which
+is what `event_risk.py` exists to detect and refuse.
+
+Two limits on that reading, both real. It compares implied against
+TRAILING realised; the premium properly concerns SUBSEQUENT realised,
+and Alpaca provides no historical implied volatility, so the correct
+test cannot be run with this data at all. And capturing the premium
+would mean SELLING options — tail risk, margin, assignment — which this
+account cannot support regardless.
+
+Recorded so the idea is not re-proposed as though it were untested.
+
 ## Start here: `python agent_channel.py`
 
 **Run it at the start of every session, before anything else.** It prints
