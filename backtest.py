@@ -603,12 +603,29 @@ def _self_test() -> int:
     return 0
 
 
-def load_history(symbols: list[str], *, days: int) -> dict[str, Any]:
+def load_history(
+    symbols: list[str], *, days: int, feed: str | None = None
+) -> dict[str, Any]:
     """Fetch 5-minute bars and attach LOCKBOT's own indicators.
 
     Indicators come from indicators.add_indicators -- the same function
     market_scanner.py uses live. Recomputing them here would test a
     different bot than the one that trades.
+
+    `feed` overrides config.ALPACA_DATA_FEED, and exists for one
+    specific and legitimate purpose: deciding whether to PAY for better
+    data.
+
+    The live scanner can only read `iex`, which carries about 4% of
+    traded volume with more than half the 5-minute intervals missing
+    entirely. Backtesting on `sip` therefore scores a bot that does not
+    currently exist -- which is exactly the point when the question is
+    whether that bot is worth buying. Alpaca serves sip history freely
+    and refuses it inside roughly 15 minutes, so the comparison costs
+    nothing.
+
+    Do NOT use sip here to evaluate the bot as it runs today. That would
+    be measuring a machine with data it cannot obtain.
     """
 
     import os
@@ -646,7 +663,7 @@ def load_history(symbols: list[str], *, days: int) -> dict[str, Any]:
                     timeframe=TimeFrame(5, TimeFrameUnit.Minute),
                     start=start,
                     end=end,
-                    feed=config.ALPACA_DATA_FEED,
+                    feed=feed or config.ALPACA_DATA_FEED,
                     # SPLIT-ADJUSTED, and this is not optional.
                     #
                     # Alpaca defaults to RAW. A 3-for-1 split then appears
