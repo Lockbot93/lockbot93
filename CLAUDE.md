@@ -313,6 +313,58 @@ Do not build entry-side features on the current signal. Cost and hazard
 controls (spread, IV, theta, event risk) are still worth having, because
 they reduce what a bad trade costs and do not depend on the signal working.
 
+## r0315: the one that looked real, and how it was killed (2026-08-05)
+
+The search was re-run at POSITION horizon (1560 bars, ~20 days) with the
+random-entry controls attached. Unlike the day-horizon run, which
+produced zero rules clearing breakeven in training, this produced 412 of
+816 against 43 expected by chance — and two finalists beat the controls
+on the holdout.
+
+    BUY_LONG when macd > macd_signal, close < vwap, close < ema_9,
+                   rsi < 35, volume > volume_avg_20
+
+Buy capitulation on a momentum turn with volume confirmation. Coherent,
+well-known, and the exact opposite of LOCKBOT's live rule, which buys
+strength. It also matched a pattern seen repeatedly and dismissed:
+inverse momentum beat momentum, bottom decile beat top decile.
+
+It then passed the check that should have killed it. universe.csv is
+survivor-heavy and "buy the dip" is precisely what that bias flatters,
+so it was re-run on 40 mega-caps that essentially never delist:
+
+    universe.csv (survivors)   42.0%   vs best control 36.7%   +5.3%
+    large caps (no bias)       41.9%   vs best control 36.4%   +5.5%
+
+Near-identical on a completely different symbol set, p=0.0000. That is
+not what an overfit rule does.
+
+**And it was still fake.** Both tests covered the SAME 365 days. Run
+across separate years:
+
+    2022 bear market   r0315 32.3%   control 32.3%   +0.1%
+    2023 recovery      r0315 38.7%   control 39.0%   -0.3%
+    2024               r0315 39.1%   control 39.4%   -0.3%
+    2025-26 (found on) r0315 42.0%   control 36.7%   +5.3%
+
+The edge exists only in the window the rule was found in. Three other
+years, thousands of trades each, indistinguishable from blind entry.
+
+### The methodological lesson, which is worth more than the rule
+
+**Replication on different SYMBOLS in the same PERIOD is not
+independent evidence.** It feels like out-of-sample and is not: every
+symbol shares the same regime, the same macro, the same year. It was
+convincing enough here to nearly justify trading a rule that has no
+edge in three of the four years available.
+
+Time is the binding dimension. Any future candidate must clear separate
+YEARS before anything else, and a rule that only works in the period it
+was discovered in is a description of that period, not a strategy.
+
+Do not re-propose r0315. It is in the search space and will be found
+again; it has been tested across four years and works in one.
+
 ## Why every strategy found online has already stopped working
 
 Read this before researching "what strategies do profitable bots use".

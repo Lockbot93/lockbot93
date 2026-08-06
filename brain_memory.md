@@ -146,3 +146,5 @@ safe to edit or prune by hand.
 - **2026-08-05 15:31** — The scan universe grew 47→52 symbols without the UNIVERSE_TOP_N hand edit being applied, so the volatility-band survivor count drifts on its own by a few names day to day — still roughly a third of the 150 cap.
 
 - **2026-08-05 18:38** — 2026-08-05: Item 46169c86 (short shadow-logging) reopened as PREMATURE only — code review passed in full (flag True, shadow_only stage-1 tagging, full stage-2 ride, no trade_approved path, measured=approved+shadow_shorts, self-tests cover it); confirm after the next market session once get_shadow_breakdown(side) shows SHORT rows — no code re-work is needed.
+
+- **2026-08-05 21:56** — 2026-08-06: First swing-horizon backtests ran with real sample sizes (218-245 trades over ~140 days each) — the swing machinery from item 4cf2ab9f works and the history-depth constraint is gone at swing; but all three parked rules (pullback-to-EMA21 long, VWAP-reclaim long, failed-bounce short) scored decisively NEGATIVE at swing: 9.6%/12.2%/12.8% win rates vs 33.3% breakeven, expectancy -0.6 to -0.7R — retire these three rules at both horizons, new ideas needed.
