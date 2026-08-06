@@ -313,6 +313,74 @@ Do not build entry-side features on the current signal. Cost and hazard
 controls (spread, IV, theta, event risk) are still worth having, because
 they reduce what a bad trade costs and do not depend on the signal working.
 
+## Why every strategy found online has already stopped working
+
+Read this before researching "what strategies do profitable bots use".
+It is the general result that explains all the specific ones below.
+
+McLean & Pontiff studied what happens to documented anomalies after
+publication: returns are **26% lower out of sample and 58% lower after
+publication**, with roughly half the alpha disappearing as investors
+learn about it and trade it away. Other work puts post-publication decay
+around 35% and finds it is real rather than statistical artefact.
+
+**Being findable is what destroys an edge.** A strategy that still
+worked would not be in a blog post; it would be inside a fund that does
+not take outside money. This is not cynicism, it is the measured
+half-life of published alpha.
+
+It also explains this project's results exactly. The strategies the
+trading-content industry lists are mean reversion, momentum, arbitrage,
+market making and scalping. Momentum and mean reversion were tested here
+and lost to their controls. The other three need colocation, exchange
+membership or microsecond latency — measured below as 54,640x out of
+reach. There was no gap in the search.
+
+Beware the numbers those sites publish. One claimed "around 60% of
+retail algorithmic traders show positive annual returns". The
+peer-reviewed evidence: Barber & Odean found **under 1%** of active
+Taiwanese day traders profitable after fees over 1992-2006; Chague &
+De-Losso tracked 19,646 Brazilian futures traders and found **97% of
+those persisting past 300 days lost money**, with the profitable 3%
+earning a median of about $10 a day. Long-run profitability sits at
+1-3%. The marketing figure is wrong by a factor of about thirty.
+
+### The one edge with a reason to persist — tested 2026-08-05
+
+Capacity-constrained anomalies escape publication decay, because decay
+requires money to be able to arrive. A $5bn fund needs a $100m position
+to matter, which in a small company means owning an uncomfortable share
+of it, so institutions structurally cannot participate. That is the only
+structural advantage a $253 account holds over a fund.
+
+Tested as an illiquidity tilt across 1,245 names, 901 sessions, sip
+feed, split-adjusted, liquidity floor dropped to $200k/day so thin names
+could actually enter:
+
+    thinnest 249 (least liquid)   +25.3% CAGR   Sharpe 1.33
+    all names (control)           +34.2% CAGR   Sharpe 1.50
+    thickest 249 (most liquid)    +20.8% CAGR   Sharpe 1.26
+
+    illiquidity premium (thin - thick)   +4.52%/yr
+    versus holding everything            -8.95%/yr
+
+The premium is REAL — thin beat thick by 4.5 points, the sign the theory
+predicts — and the capacity argument holds: a $50 position is 0.0119% of
+a day's volume in that bucket, so a small account genuinely can go where
+funds cannot.
+
+It is still not a strategy. Holding everything beat both extremes, and
+three things eat the 4.5% before it reaches an account: monthly
+rebalancing across 249 thin names is enormous turnover, thin names carry
+the widest spreads (a 0.5% round trip twelve times a year is 6%), and
+survivorship bias is worst exactly here, since small illiquid companies
+are the ones that go to zero and vanish from the sample.
+
+Recorded because it is the closest thing to a real edge found, and
+because the reason it fails is transaction costs rather than absence of
+signal. If anything is ever revisited, revisit this — with a spread
+model attached.
+
 ## The entry rule is worse than buying at random (2026-08-05)
 
 This supersedes everything above about whether the strategy has an edge.
