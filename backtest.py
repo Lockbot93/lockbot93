@@ -614,6 +614,7 @@ def load_history(symbols: list[str], *, days: int) -> dict[str, Any]:
     import os
 
     import pandas as pd
+    from alpaca.data.enums import Adjustment
     from alpaca.data.historical.stock import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -646,6 +647,20 @@ def load_history(symbols: list[str], *, days: int) -> dict[str, Any]:
                     start=start,
                     end=end,
                     feed=config.ALPACA_DATA_FEED,
+                    # SPLIT-ADJUSTED, and this is not optional.
+                    #
+                    # Alpaca defaults to RAW. A 3-for-1 split then appears
+                    # as a 67% single-day collapse that never happened,
+                    # which trips every stop below it and invents a
+                    # catastrophic loss for any open long.
+                    #
+                    # Found 2026-08-05: over a 365-day window, 3 of 40
+                    # universe symbols were affected (XLU, BN, HDB), and
+                    # over 5 years 7 of 12 index ETFs were -- XLE reads
+                    # +17% raw against +182% adjusted. Every backtest run
+                    # before this date over a window containing a split
+                    # was scoring a price series that never existed.
+                    adjustment=Adjustment.ALL,
                 )
             )
         except Exception as error:

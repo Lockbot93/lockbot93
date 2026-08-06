@@ -337,10 +337,15 @@ random walk touches +4% before −2%. So beating it by a point means
 nothing without a control. Run over identical data and bracket:
 
     rule             trades   win rate   avg R        p
-    live rule          2485      34.4%   +0.03   0.1238
-    live inverted      2593      32.8%   -0.02   0.7178
-    always long        3082      35.2%   +0.06   0.0159
-    scattered long     2504      35.9%   +0.08   0.0034
+    live rule          2497      33.8%   +0.01   0.3330
+    live inverted      2570      33.5%   +0.01   0.4363
+    always long        3027      36.0%   +0.08   0.0010
+    scattered long     2460      36.7%   +0.10   0.0002
+
+(Re-run 2026-08-05 on split-adjusted prices — see the split bug below.
+The first run used raw bars and was slightly kinder to the rule. The
+rule and its exact inverse now land within 0.3 points of each other,
+which is what zero information looks like.)
 
 **Buying on every bar beats the rule. Entering at random beats it by
 more.** The rule's own p-value is 0.12 — indistinguishable from chance —
@@ -376,6 +381,56 @@ bar in a drifting market. Any long-biased rule clears it in a rising
 year while adding nothing. **Never judge a rule against breakeven
 alone — always against random entry over the same bars.** The controls
 are cheap and they are the difference between a finding and an artifact.
+
+### Alpaca bars are NOT split-adjusted by default (found 2026-08-05)
+
+Every backtest run before this date over a window containing a split
+was scoring a price series that never existed.
+
+`StockBarsRequest` defaults to `Adjustment.RAW`. A 3-for-1 split then
+appears as a 67% single-day collapse, which trips every stop beneath it
+and invents a catastrophic loss for any open long. It is silent: the
+data arrives, the code runs, the numbers look plausible.
+
+Scale of it, measured:
+
+    365-day window, 40 universe names   3 corrupted (XLU, BN, HDB)
+    5-year window, 12 index ETFs        7 corrupted
+      XLE   +17.4% raw   vs  +181.7% adjusted
+      XLK   +20.4% raw   vs  +150.0% adjusted
+      SCHG  -76.7% raw   vs   +91.0% adjusted
+
+`backtest.load_history` now passes `adjustment=Adjustment.ALL`. Any new
+code fetching bars must do the same — the default is wrong for every
+purpose this project has.
+
+It surfaced because a test said SCHG had lost 43% over five years, which
+is simply false. **When a number is impossible, check the data before
+believing the finding.** A 200-day-average test had already produced a
+confident, entirely fictional conclusion from it.
+
+### Cross-sectional momentum was tested too (2026-08-05)
+
+The strongest remaining candidate, and the opposite of everything else
+here: no entry timing, no intraday data, daily bars, monthly rebalance.
+Rank nine sector ETFs by 6-month return skipping the recent month, hold
+the top three. Sector ETFs deliberately, not universe.csv — that file is
+screened today, so testing it over five years is survivorship bias.
+
+Five years, 1,253 sessions, split-adjusted, spanning the 2022 bear
+market:
+
+    momentum (top 3)          +10.6% CAGR   Sharpe 0.68   maxDD -20.9%
+    equal weight (control)    +12.9%        Sharpe 0.90   maxDD -16.9%
+    inverse momentum          +15.1%        Sharpe 0.88   maxDD -23.2%
+    SPY buy and hold          +15.9%        Sharpe 0.95   maxDD -22.1%
+
+Ranking lost to not ranking by 2.3 points a year, with a worse Sharpe
+and a deeper drawdown. Holding the index beat every variant.
+
+That is four families now — entry rules, holding horizons, variance
+premium, cross-sectional momentum — each tested against a control, each
+losing to doing nothing. Do not re-propose any of them as untested.
 
 ### The obvious structural alternative was also tested (2026-08-05)
 
