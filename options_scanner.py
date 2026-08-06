@@ -564,15 +564,26 @@ def run_options_scanner() -> OptionsScannerSummary:
         # exits whatever the day has done -- refusing to close positions
         # because the day is bad is how a bad day becomes a catastrophic
         # one, and options have no broker-side stop to fall back on.
-        from risk_engine import check_daily_loss_limit
+        #
+        # And it gates on THIS book's losses. Passing account.equity
+        # here meant equity losses and ETF sleeve marks blocked option
+        # entries -- the mirror of the bug that blocked share entries on
+        # option marks. Same account number, same wrong answer, opposite
+        # direction. Found when the equity side was fixed on 2026-08-06.
+        from risk_engine import check_book_daily_loss, options_book_pnl
+
+        try:
+            open_positions_now = trading_client.get_all_positions()
+        except Exception:
+            open_positions_now = []
 
         (
             daily_loss_reached,
             daily_pnl,
             daily_pnl_percent,
             daily_reason,
-        ) = check_daily_loss_limit(
-            account_equity,
+        ) = check_book_daily_loss(
+            options_book_pnl(open_positions_now),
             float(account.last_equity or 0),
         )
 

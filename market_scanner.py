@@ -58,7 +58,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from risk_engine import check_daily_loss_limit
+from risk_engine import check_book_daily_loss, equity_book_pnl
 from risk_manager import (
     TradeRiskRequest,
     evaluate_trade_request,
@@ -819,21 +819,38 @@ def main():
         previous_close_equity = float(account.last_equity)
         buying_power = float(account.buying_power)
 
+        # THIS BOOK'S losses, not the account's.
+        #
+        # Passing account.equity here gated share entries on marks from
+        # positions this path does not own. On 2026-08-06 the equity
+        # path was locked all day at -3.02% while the equity book was
+        # flat: the whole move was an IBIT spread's two legs marking
+        # independently, with nothing sold and nothing realised. The ETF
+        # sleeve leaked in the same way, despite position_filters
+        # existing so the trading engine cannot see it.
+        try:
+            open_positions_now = with_retries(
+                trading_client.get_all_positions)()
+        except Exception:
+            open_positions_now = []
+
+        equity_pnl = equity_book_pnl(open_positions_now)
+
         (
             daily_loss_limit_reached,
             daily_pnl,
             daily_pnl_percent,
             daily_loss_reason,
-        ) = check_daily_loss_limit(
-            current_equity=account_equity,
-            previous_close_equity=previous_close_equity,
+        ) = check_book_daily_loss(
+            equity_pnl,
+            previous_close_equity,
         )
 
         print("\nPaper Account Check")
         print(f"Account Status : {account.status}")
         print(f"Equity         : ${account_equity:,.2f}")
         print(f"Prior Equity   : ${previous_close_equity:,.2f}")
-        print(f"Daily P&L      : ${daily_pnl:,.2f}")
+        print(f"Equity Book P&L: ${daily_pnl:,.2f}  (this book only)")
         print(f"Daily P&L %    : {daily_pnl_percent:.2%}")
         print(f"Loss Limit Hit : {daily_loss_limit_reached}")
         print(f"Buying Power   : ${buying_power:,.2f}")
