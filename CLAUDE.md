@@ -382,6 +382,47 @@ year while adding nothing. **Never judge a rule against breakeven
 alone — always against random entry over the same bars.** The controls
 are cheap and they are the difference between a finding and an artifact.
 
+### What the free feed actually shows you (measured 2026-08-05)
+
+The note further down says the iex feed "reports only a fraction of real
+volume". Here is the fraction, against the full consolidated tape:
+
+    symbol      iex avg daily        sip (full tape)     iex share
+    AAPL            1,956,112             55,457,342          3.5%
+    SPY             1,557,218             49,318,317          3.2%
+    F               2,187,425             53,884,617          4.1%
+    PCG             1,383,135             21,809,406          6.3%
+    IBIT            1,605,483             35,781,648          4.5%
+
+**LOCKBOT sees about 4% of what trades.** Every volume comparison it
+makes — `volume_ratio`, `volume_confirmed`, the volume gate that decides
+which shorts get measured — is computed from that sample.
+
+It is worse than a 4% sample of every bar. Over one 8-hour window AAPL
+returned 83 bars on sip and 38 on iex: less than half. The missing ones
+are intervals in which nothing traded on IEX at all, so the bar simply
+does not exist and the indicators skip a beat that really happened.
+
+And the quote quality: a resting iex quote on AAPL read bid 293.64 / ask
+324.64. A $31 spread on the most liquid stock in the world, because so
+little rests on that one venue.
+
+**The trap: sip is available for history but refused live.**
+
+    end - 60m   sip   ok
+    end - 20m   sip   ok
+    end -  5m   sip   "subscription does not permit querying recent SIP data"
+    live quote  sip   refused
+
+So a backtest CAN be run on the real tape — and doing so would score a
+bot that cannot exist, because the live scanner will only ever see iex.
+Backtest on iex and you are measuring a distorted world; backtest on sip
+and you are measuring a bot you cannot deploy. There is no honest
+configuration available on this subscription.
+
+That is the concrete reason "better rules" cannot rescue this. The
+inputs are a 4% volume sample with missing bars and unusable quotes.
+
 ### Alpaca bars are NOT split-adjusted by default (found 2026-08-05)
 
 Every backtest run before this date over a window containing a split
