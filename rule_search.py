@@ -192,6 +192,34 @@ def generate_candidates() -> list[dict]:
         (None, "at any volume"),
     ]
 
+    # Trend STRENGTH, which nothing in the original space could express.
+    #
+    # Every condition above asks where price sits relative to an average
+    # or whether momentum is rising. None asks how hard the market is
+    # moving. ADX answers that without saying which direction, so a rule
+    # can now require "a real trend" rather than inferring one from price
+    # position -- and equally can require its absence, which is the
+    # condition a mean-reversion setup actually wants.
+    strength = [
+        ({"left": "adx", "op": ">", "right": 25},
+         "in a strong trend"),
+        ({"left": "adx", "op": "<", "right": 20},
+         "in a rangebound market"),
+        (None, "at any trend strength"),
+    ]
+
+    # Directional pressure, likewise absent. plus_di over minus_di says
+    # buyers are pressing, independent of where price sits.
+    pressure = [
+        ({"left": "plus_di", "op": ">", "right": "minus_di"},
+         "with buyers pressing"),
+        ({"left": "minus_di", "op": ">", "right": "plus_di"},
+         "with sellers pressing"),
+        (None, "with no pressure filter"),
+    ]
+
+    from strategy_lab import MAX_CONDITIONS
+
     specs: list[dict] = []
 
     for side in ("BUY_LONG", "SELL_SHORT"):
@@ -200,28 +228,35 @@ def generate_candidates() -> list[dict]:
                 for loc, loc_text in location:
                     for rsi, rsi_text in rsi_bands:
                         for vol, vol_text in volume_filters:
-                            conditions = [mom] + list(loc)
+                            for adx, adx_text in strength:
+                                for di, di_text in pressure:
+                                    conditions = [mom] + list(loc)
 
-                            if rsi is not None:
-                                conditions.append(rsi)
+                                    for extra in (rsi, vol, adx, di):
+                                        if extra is not None:
+                                            conditions.append(extra)
 
-                            if vol is not None:
-                                conditions.append(vol)
+                                    # The 6-condition ceiling stays. More
+                                    # conditions fit history better and
+                                    # predict worse, and raising it to
+                                    # admit the new dimensions would trade
+                                    # the guard for the search.
+                                    if len(conditions) > MAX_CONDITIONS:
+                                        continue
 
-                            if len(conditions) > 6:
-                                continue
-
-                            specs.append({
-                                "name": f"r{len(specs):04d}",
-                                "side": side,
-                                "trend": trend,
-                                "rationale": (
-                                    f"{side.lower().replace('_', ' ')} when "
-                                    f"trend is {trend.lower()}, {mom_text}, "
-                                    f"{loc_text}, {rsi_text}, {vol_text}"
-                                ),
-                                "conditions": conditions,
-                            })
+                                    specs.append({
+                                        "name": f"r{len(specs):04d}",
+                                        "side": side,
+                                        "trend": trend,
+                                        "rationale": (
+                                            f"{side.lower().replace('_', ' ')}"
+                                            f" when trend is {trend.lower()},"
+                                            f" {mom_text}, {loc_text},"
+                                            f" {rsi_text}, {vol_text},"
+                                            f" {adx_text}, {di_text}"
+                                        ),
+                                        "conditions": conditions,
+                                    })
 
     return specs
 

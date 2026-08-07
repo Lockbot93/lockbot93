@@ -54,6 +54,16 @@ FIELDS = {
     "close", "open", "high", "low",
     "ema_9", "ema_21", "vwap", "rsi",
     "macd", "macd_signal", "atr", "volume", "volume_avg_20",
+    # Added 2026-08-06. add_indicators has computed these on every bar
+    # since the project began and no rule could ever reference them, so
+    # the entire 864-rule search space was blind to trend STRENGTH and
+    # to directional pressure -- information genuinely absent from the
+    # price-vs-average and momentum conditions it did contain.
+    #
+    # adx measures how strongly a trend is moving without saying which
+    # way; plus_di and minus_di say which way without saying how hard.
+    # Neither is expressible as a combination of the fields above.
+    "adx", "plus_di", "minus_di",
 }
 
 # Numeric literals are allowed on the right-hand side. Operators are a
