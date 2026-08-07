@@ -288,6 +288,49 @@ not a strategy; it is a better way to hold whatever you already hold.
 Do not read the trailing-stop number as an edge. Read it as: if anything
 is ever held with a stop, trail it rather than fixing it.
 
+### The drift objection, and the test that settled it
+
+LOCKBOT accepted the refutation in form and contested it in substance,
+with the strongest objection available: a trailing stop harvests DRIFT
+without any autocorrelation at all. It holds winners and cuts losers, so
+time-in-market is loaded onto positions already rising, and in four
+up-years "+0.05R, positive every year" is exactly what pure drift plus
+differential exposure would print.
+
+It proposed the discriminator: run the same arms on random SHORTS. If
+the lift is drift exposure it vanishes or flips; if shorts gain too, it
+is real. 5,987 seeded entries each, 10bp/side charged:
+
+    direction  exit    mean R   net of cost   bars held    R/bar
+    long       fixed   +0.089      +0.049        10.7    +0.0083
+    long       trail   +0.142      +0.102         8.7    +0.0163
+    short      fixed   -0.072      -0.112        10.7    -0.0068
+    short      trail   -0.021      -0.061         7.7    -0.0027
+
+    trail lift on LONGS   +0.054R
+    trail lift on SHORTS  +0.051R
+
+**The objection is refuted.** The lift is the same size on shorts, so it
+is not drift exposure. And its own second check cuts harder still: the
+mechanism required holding winners LONGER, but the trail holds FEWER
+bars (8.7 vs 10.7) while producing more R -- R per bar nearly doubles.
+Exposure cannot explain that.
+
+Net of costs the long trail makes +0.102R against the +0.10R bar
+LOCKBOT pre-registered. It clears, barely, and the margin is thin enough
+that a worse cost assumption would sink it.
+
+WHAT THIS IS AND IS NOT. It is a real exit improvement of about +0.05R,
+independent of direction, surviving costs. It is NOT a tradeable edge:
+random long entries net +0.102R because the market rose, and shorts stay
+negative (-0.061R) even with the better exit. The trail improves how you
+hold; it does not tell you what to hold.
+
+The part of LOCKBOT's original claim that survives is the part that
+mattered: every entry edge measured under every exit is within
++/-0.05R. The trail did not expose a hidden edge, it confirmed there was
+never one.
+
 `exit_strategies.py` holds the three structures and 12 self-tests,
 including that an intrabar low is not rescued by the same bar's high --
 the classic way a trailing-stop backtest flatters itself.
