@@ -581,6 +581,26 @@ def brief_for_lockbot(*, path: Path | None = None) -> dict[str, Any]:
             if i["sender"] == "lockbot" and i["kind"] in ACTIONABLE
             and i["status"] in UNFINISHED
         ],
+        # Notes you filed. Not actionable, so they are not in the list
+        # above -- but you cannot remember filing them either.
+        #
+        # On 2026-08-07 LOCKBOT relayed an owner directive as a note
+        # (bd26ffca), and the next session denied the item existed: "no
+        # such item exists in my engineer channel and I filed no such
+        # note." Both halves were honest. The record was in the file with
+        # sender=lockbot, and it was in NO section of this brief, because
+        # every section filters on ACTIONABLE or on sender=agent. A
+        # stateless reader plus an invisible record equals a sincere
+        # denial of its own writing, and that nearly stalled a directive.
+        #
+        # Capped and newest-first: these accumulate and none of them need
+        # action, so they are context, not a queue.
+        "notes_you_filed": [
+            {"id": i["id"], "at": i["at"], "status": i["status"],
+             "subject": i["subject"], "body": i["body"][:400]}
+            for i in everything
+            if i["sender"] == "lockbot" and i["kind"] not in ACTIONABLE
+        ][-6:][::-1],
         "waiting_on_you": [
             {"id": i["id"], "at": i["at"], "subject": i["subject"],
              "body": i["body"][:600]}
@@ -834,6 +854,22 @@ def _self_test() -> int:
           lockbot_view["open_items_you_raised"] == [])
     check("lockbot is told verification is its job",
           "verify_fix" in lockbot_view["YOUR_JOB_HERE"])
+
+    # A note LOCKBOT files must come back to it. It is stateless, so a
+    # record it cannot see is a record it will sincerely deny writing --
+    # which is exactly what happened to bd26ffca on 2026-08-07.
+    note_id = post("lockbot", "Owner directive relayed",
+                   "The owner asked for entries to be re-enabled.",
+                   kind="note", path=log)
+    lockbot_view = brief_for_lockbot(path=log)
+
+    check("a note LOCKBOT filed comes back to LOCKBOT",
+          any(i["id"] == note_id for i in lockbot_view["notes_you_filed"]),
+          str(lockbot_view["notes_you_filed"]))
+    check("with enough body to recognise it",
+          "re-enabled" in lockbot_view["notes_you_filed"][0]["body"])
+    check("and it is still not in the actionable queue",
+          all(i["id"] != note_id for i in lockbot_view["open_items_you_raised"]))
 
     post("agent", "Rounded entry_debit", "constructor now rounds",
          kind="fix", path=log)

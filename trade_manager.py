@@ -43,6 +43,7 @@ from trade_journal import (
     record_completed_trade,
 )
 import lockbot_config as config
+import trade_horizon
 
 
 # ============================================================
@@ -73,7 +74,24 @@ PENDING_COLUMNS = [
     "take_profit_percent",
     "registered_at",
     "paper_trade",
+    # Added 2026-08-07 for agent_channel a002c6a0. See trade_horizon.py.
+    "horizon",
 ]
+
+# The header as it was before horizons existed.
+#
+# A live lockbot_pending_trades.csv written yesterday still has this
+# shape, and _validate_pending_header compared for exact equality and
+# raised RuntimeError telling the reader to back the file up. That would
+# have stopped trade_manager dead on the first cycle after this change —
+# with real positions open and their reconciliation frozen.
+#
+# So the old header is accepted for READING and every row is upgraded on
+# the next write. A missing horizon becomes "unknown" and is never
+# guessed as "day": a wrong tag silently poisons the per-horizon
+# comparison this column exists to make possible.
+LEGACY_PENDING_COLUMNS = [column for column in PENDING_COLUMNS
+                          if column != "horizon"]
 
 
 # ============================================================
@@ -212,9 +230,15 @@ def initialize_pending_trades() -> Path:
 def _validate_pending_header(
     fieldnames: list[str] | None,
 ) -> None:
-    """Confirm that the pending registry uses the expected schema."""
+    """Confirm that the pending registry uses a schema we understand.
 
-    if fieldnames == PENDING_COLUMNS:
+    Two are understood: the current one, and the pre-horizon one it
+    replaced on 2026-08-07. Anything else still raises, because an
+    unrecognised header means somebody has edited the file by hand and
+    guessing at its columns would corrupt live trade records.
+    """
+
+    if fieldnames in (PENDING_COLUMNS, LEGACY_PENDING_COLUMNS):
         return
 
     raise RuntimeError(
@@ -224,7 +248,11 @@ def _validate_pending_header(
 
 
 def _read_pending_trades() -> list[dict[str, str]]:
-    """Read all currently registered LOCKBOT trades."""
+    """Read all currently registered LOCKBOT trades.
+
+    Rows from the pre-horizon schema come back tagged "unknown" rather
+    than being guessed. They are upgraded on the next write.
+    """
 
     initialize_pending_trades()
 
@@ -235,7 +263,13 @@ def _read_pending_trades() -> list[dict[str, str]]:
     ) as pending_file:
         reader = csv.DictReader(pending_file)
         _validate_pending_header(reader.fieldnames)
-        return list(reader)
+        rows = list(reader)
+
+    for row in rows:
+        if not str(row.get("horizon") or "").strip():
+            row["horizon"] = trade_horizon.UNKNOWN
+
+    return rows
 
 
 def _write_pending_trades(
@@ -323,6 +357,44 @@ def _load_journal_trade_ids() -> set[str]:
 # Trade registration
 # ============================================================
 
+def next_horizon_sequence() -> int:
+    """How many equity trades LOCKBOT has taken, for the horizon rotation.
+
+    trade_horizon.choose() is a pure function of a counter, so something
+    has to supply one that survives a restart. The obvious counter would
+    be a number in the scanner's state file, and it would be wrong: the
+    controller spawns market_scanner as a fresh subprocess every cycle,
+    so an in-memory counter is always zero and the rotation would return
+    "overnight" forever. A mix that never mixes is the failure this whole
+    item exists to correct, and it would have looked like it worked.
+
+    Counting the trade record instead makes the sequence monotonic for
+    free, with no new file to keep in step. Completed trades only ever
+    grow; pending ones are added at entry and removed at exit, so the sum
+    advances by one per entry and never goes backwards within a cycle.
+
+    Returns 0 on any read failure. A wrong horizon is a labelling problem;
+    an exception here would stop an order being submitted.
+    """
+
+    completed = 0
+    pending = 0
+
+    try:
+        with JOURNAL_FILE.open(mode="r", newline="",
+                               encoding="utf-8-sig") as handle:
+            completed = max(sum(1 for _ in handle) - 1, 0)
+    except OSError:
+        pass
+
+    try:
+        pending = len(_read_pending_trades())
+    except (OSError, RuntimeError):
+        pass
+
+    return completed + pending
+
+
 def register_bracket_trade(
     *,
     parent_order_id: str,
@@ -337,12 +409,20 @@ def register_bracket_trade(
     stop_loss_percent: float,
     take_profit_percent: float,
     paper_trade: bool = True,
+    horizon: str = trade_horizon.UNKNOWN,
 ) -> bool:
     """
     Register a newly submitted LOCKBOT bracket order.
 
     Returns True when a new row is added.
     Returns False when that parent order is already registered.
+
+    `horizon` is how long the trade is MEANT to be held — see
+    trade_horizon.py. It defaults to "unknown" rather than to a real
+    horizon, so a caller that has not been taught about horizons cannot
+    silently mislabel a trade. An unreadable value normalises to
+    "unknown" too; it is never rejected, because a trade whose bracket is
+    already live at the broker must be registered whatever its tag says.
     """
 
     normalized_order_id = str(
@@ -427,6 +507,7 @@ def register_bracket_trade(
                 timespec="seconds"
             ),
             "paper_trade": paper_trade,
+            "horizon": trade_horizon.normalise(horizon),
         }
     )
 

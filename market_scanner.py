@@ -95,7 +95,7 @@ from market_regime import get_market_regime
 from regime_filter import check_regime_approval
 from notifications import send_smart_notification
 from scanner_state import save_state
-from trade_manager import register_bracket_trade
+from trade_manager import next_horizon_sequence, register_bracket_trade
 from system_heartbeat import (
     mark_module_critical,
     mark_module_degraded,
@@ -116,11 +116,19 @@ except Exception:  # shadow logging is optional, never load-bearing
     record_candidates = None
 
 try:
-    from adaptive_brackets import compute_bracket, load_atr_table, OK as BRACKET_OK
+    from adaptive_brackets import (
+        compute_bracket,
+        load_atr_table,
+        load_settings as load_bracket_settings,
+        OK as BRACKET_OK,
+    )
 except Exception:  # adaptive brackets absent — the fixed 2%/4% path still works
     compute_bracket = None
     load_atr_table = None
+    load_bracket_settings = None
     BRACKET_OK = "OK"
+
+import trade_horizon
 
 try:
     from signal_quality import compute_quality, load_weights
@@ -184,6 +192,11 @@ USE_QUALITY_RANKING = _cfg("USE_QUALITY_RANKING", False)
 # share orders — see lockbot_config.py. Defaults True so a missing config
 # key can never silently stop trading.
 EQUITY_ENTRIES_ENABLED = _cfg("EQUITY_ENTRIES_ENABLED", True)
+
+# How long a new equity trade is MEANT to be held — see trade_horizon.py.
+# Defaults to "overnight", which is what LOCKBOT traded by accident before
+# horizons existed, so a missing config key changes nothing.
+EQUITY_HORIZON_POLICY = _cfg("EQUITY_HORIZON_POLICY", "overnight")
 
 # Advance shorts LOCKBOT cannot trade into the shadow log so the strategy
 # is measured on all of its output, not just the long half. Defaults
@@ -381,6 +394,7 @@ def calculate_bracket_and_size(
     symbol,
     is_long,
     movement_table,
+    horizon=trade_horizon.UNKNOWN,
 ):
     """Return (shares, stop_percent, take_profit_percent) for one candidate.
 
@@ -392,6 +406,14 @@ def calculate_bracket_and_size(
     comes down to match, so the dollars at risk per trade stay where
     MAX_RISK_PER_TRADE_PERCENT put them. Widening the stop on its own would
     quietly multiply risk per trade without anyone deciding to.
+
+    `horizon` widens that stop for a swing and leaves it alone otherwise
+    (trade_horizon.py). Because the share count is derived from the risk
+    budget, a swing trade automatically buys FEWER shares with a wider
+    stop — the horizon changes how much room the trade gets, never how
+    many dollars are at stake. Nothing about the fixed-bracket fallback
+    path changes, so a horizon tag with adaptive brackets off is a label
+    and nothing more.
     """
 
     if not USE_ADAPTIVE_BRACKETS or compute_bracket is None:
@@ -402,12 +424,26 @@ def calculate_bracket_and_size(
         )
         return shares, STOP_LOSS_PERCENT, TAKE_PROFIT_PERCENT
 
+    settings = None
+
+    if load_bracket_settings is not None:
+        try:
+            settings = trade_horizon.bracket_settings_for(
+                horizon, load_bracket_settings()
+            )
+        except Exception:
+            # A bad horizon or an unreadable settings file must not stop
+            # a trade being sized. compute_bracket loads its own defaults
+            # when handed None, which is the pre-horizon behaviour.
+            settings = None
+
     bracket = compute_bracket(
         symbol=symbol,
         price=entry_price,
         equity=account_equity,
         atr_pct=(movement_table or {}).get(symbol),
         side="long" if is_long else "short",
+        settings=settings,
     )
 
     if bracket.get("status") != BRACKET_OK:
@@ -876,6 +912,22 @@ def main():
                 "Existing positions still exit normally through their brackets."
             )
 
+        # Where the horizon rotation has got to. Read once per cycle from
+        # the trade record rather than held in memory: the controller
+        # spawns this module fresh every five minutes, so anything kept
+        # in a local counter would restart at zero and the "mixed" policy
+        # would emit its first horizon forever.
+        horizon_sequence = next_horizon_sequence()
+
+        if EQUITY_HORIZON_POLICY == "mixed":
+            print(
+                f"Horizon        : mixed, next is "
+                f"{trade_horizon.choose(EQUITY_HORIZON_POLICY, sequence=horizon_sequence)} "
+                f"(trade #{horizon_sequence + 1})"
+            )
+        else:
+            print(f"Horizon        : every entry is {EQUITY_HORIZON_POLICY}")
+
         save_state(
             {
                 "scan_time": datetime.now(timezone.utc).isoformat(),
@@ -1071,6 +1123,26 @@ def main():
                     result["approval_reason"] = regime_reason
                     continue
 
+                # Chosen BEFORE the bracket is sized, because a swing
+                # horizon widens the stop and therefore changes the share
+                # count. Deciding it after would produce a trade tagged
+                # swing and bracketed as a day trade — a label that lies,
+                # which is worse than no label.
+                #
+                # Every candidate evaluated this cycle gets the same
+                # horizon, and that is correct rather than a shortcut.
+                # The rotation must advance once per TRADE TAKEN, not
+                # once per setup considered, and most setups are never
+                # submitted — advancing per candidate would make the mix
+                # depend on how many names happened to be scanned.
+                # MAX_NEW_ENTRIES_PER_CYCLE is 1, so at most one of these
+                # is acted on; the counter then advances by exactly one
+                # because next_horizon_sequence() counts the record.
+                result["horizon"] = trade_horizon.choose(
+                    EQUITY_HORIZON_POLICY,
+                    sequence=horizon_sequence,
+                )
+
                 (
                     position_size,
                     stop_percent,
@@ -1082,6 +1154,7 @@ def main():
                     symbol=symbol,
                     is_long=result["signal"] == "BUY_LONG",
                     movement_table=movement_table,
+                    horizon=result["horizon"],
                 )
 
                 if position_size <= 0:
@@ -1444,6 +1517,12 @@ def main():
                     stop_loss_percent=stop_percent,
                     take_profit_percent=take_profit_percent,
                     paper_trade=True,
+                    # The horizon this setup was SIZED for, back at the
+                    # bracket calculation. Read from the result rather
+                    # than recomputed, so the tag on the record and the
+                    # stop that is actually live at the broker can never
+                    # disagree.
+                    horizon=result.get("horizon", trade_horizon.UNKNOWN),
                 )
 
                 # Keep our view of the account current so the next candidate

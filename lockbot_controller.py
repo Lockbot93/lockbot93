@@ -51,6 +51,7 @@ SCANNER_FILE = PROJECT_FOLDER / "market_scanner.py"
 TRADE_MANAGER_FILE = PROJECT_FOLDER / "trade_manager.py"
 HEALTH_MONITOR_FILE = PROJECT_FOLDER / "health_monitor.py"
 POSITION_MONITOR_FILE = PROJECT_FOLDER / "position_monitor.py"
+EQUITY_TIME_STOP_FILE = PROJECT_FOLDER / "equity_time_stop.py"
 OPTIONS_MANAGER_FILE = PROJECT_FOLDER / "options_manager.py"
 OPTIONS_SCANNER_FILE = PROJECT_FOLDER / "options_scanner.py"
 STARTUP_RECONCILIATION_FILE = PROJECT_FOLDER / "startup_reconciliation.py"
@@ -496,6 +497,23 @@ def run_controller() -> None:
                 time.sleep(backoff_seconds)
                 continue
 
+            # Equities run exits BEFORE entries too, for the same reason
+            # the options pair does below: a position already held has a
+            # stronger claim on the cycle than one not yet opened.
+            #
+            # It matters more than it looks. This is what flattens a
+            # day-horizon position before the close, and the controller
+            # only wakes every SCAN_INTERVAL_SECONDS — running it after
+            # the scanner would spend part of that window on a scan and
+            # could push the flatten past the bell.
+            equity_time_stop_ok = True
+
+            if getattr(config, "EQUITY_TIME_STOP_ENABLED", True):
+                equity_time_stop_ok = run_component_with_recovery(
+                    script_path=EQUITY_TIME_STOP_FILE,
+                    component_name="Equity Time Stop",
+                )
+
             scanner_ok = run_component_with_recovery(
                 script_path=SCANNER_FILE,
                 component_name="Market Scanner",
@@ -539,6 +557,7 @@ def run_controller() -> None:
                 scanner_ok
                 and manager_ok
                 and position_monitor_ok
+                and equity_time_stop_ok
                 and options_manager_ok
                 and options_scanner_ok
                 and health_ok

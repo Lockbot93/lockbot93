@@ -66,6 +66,7 @@ COMPONENTS = {
     "volatility": "universe_volatility.py",
     "shadow": "shadow_trades.py",
     "rearm": "rearm_brackets.py",
+    "timestop": "equity_time_stop.py",
 }
 
 # Sessions that are safe to clear — none of them trade or hold a stop.

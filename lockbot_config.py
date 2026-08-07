@@ -94,6 +94,54 @@ EQUITY_ENTRIES_ENABLED = False
 # module docstring for the full rationale.
 ENABLE_PAPER_EXITS = False
 
+
+# ------------------------------------------------------------
+# Holding horizons
+# ------------------------------------------------------------
+#
+# Owner directive 2026-08-07: LOCKBOT must be able to take a mix of day
+# trades, swings and overnight holds. Before this it had no concept of
+# one — every trade rode its bracket for whatever ~23–25 hours it took,
+# which is an accidental overnight hold and was recorded as nothing.
+#
+# See trade_horizon.py for what each horizon changes. In short: the stop
+# width, the maximum hold, and whether the position must be flat by the
+# close. Entry selection is untouched.
+#
+# THIS IS PLUMBING, NOT A STRATEGY. Every swing entry rule tested in the
+# lab is negative, and the horizon tag exists so results can finally be
+# GROUPED by holding period — not because any period is known to work.
+
+# One of "mixed", "day", "overnight", "swing". "overnight" reproduces the
+# behaviour LOCKBOT had before horizons existed.
+EQUITY_HORIZON_POLICY = "mixed"
+
+# The rotation used when the policy is "mixed". A deliberately
+# uninformative sampling scheme, not a judgement about which horizon is
+# better — choosing per setup would be a new entry-side model, and after
+# seventeen failed entry families that is not something to invent here.
+#
+# Day appears once in five because PDT allows three round trips per five
+# business days under $25,000, so that is roughly the real day-horizon
+# capacity. A rotation producing more would simply be blocked, and a
+# blocked entry teaches nothing.
+EQUITY_HORIZON_MIX = ("overnight", "swing", "day", "overnight", "swing")
+
+# The software time stop for day-horizon equity positions, owned by
+# equity_time_stop.py.
+#
+# Options have no broker-side stop, which is why options_manager.py
+# exists. Day-horizon equities have the opposite problem: they have a
+# bracket, and the time stop must not race it. The module cancels the
+# bracket, confirms the cancel, and only then closes — never both at once.
+EQUITY_TIME_STOP_ENABLED = True
+
+# How long before the close a day-horizon position is flattened. Wide
+# enough that a cancel-then-close round trip completes comfortably; the
+# controller only wakes every SCAN_INTERVAL_SECONDS (300), so anything
+# under about 10 minutes could be missed entirely.
+DAY_HORIZON_FLATTEN_MINUTES_BEFORE_CLOSE = 15
+
 ALPACA_API_KEY_ENV = "ALPACA_API_KEY"
 ALPACA_SECRET_KEY_ENV = "ALPACA_SECRET_KEY"
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -51,7 +52,16 @@ COMPLETED_TRADE_COLUMNS = [
     "confidence",
     "paper_trade",
     "journal_version",
+    # Added 2026-08-07 for agent_channel a002c6a0. How long the trade was
+    # MEANT to be held — see trade_horizon.py. Without it, results cannot
+    # be grouped by holding period, which is the entire point of the item.
+    "horizon",
 ]
+
+# The header as it stood before horizons existed. Accepted for reading and
+# migrated in place on the next initialize; see _migrate_completed_header.
+LEGACY_COMPLETED_TRADE_COLUMNS = [column for column in COMPLETED_TRADE_COLUMNS
+                                  if column != "horizon"]
 
 
 @dataclass
@@ -103,6 +113,54 @@ def normalize_text(value: Any) -> str:
     return str(raw_value).strip()
 
 
+def _migrate_completed_header() -> None:
+    """Add the horizon column to a pre-2026-08-07 completed_trades.csv.
+
+    A one-time, in-place upgrade. Every existing row is tagged "unknown",
+    never "day": these trades were taken before the engine had any notion
+    of a holding period, so their intended horizon is genuinely not
+    known, and inventing one would poison the per-horizon comparison the
+    column exists to make possible.
+
+    Writes a .pre-horizon backup first and replaces the file atomically.
+    This is the permanent record of every trade LOCKBOT has completed —
+    a half-written one is not recoverable from anywhere else.
+    """
+
+    with COMPLETED_TRADES_FILE.open(
+        mode="r",
+        newline="",
+        encoding="utf-8-sig",
+    ) as completed_file:
+        rows = list(csv.DictReader(completed_file))
+
+    backup = COMPLETED_TRADES_FILE.with_suffix(".csv.pre-horizon")
+
+    if not backup.exists():
+        shutil.copy2(COMPLETED_TRADES_FILE, backup)
+
+    for row in rows:
+        row.setdefault("horizon", "unknown")
+
+        if not str(row.get("horizon") or "").strip():
+            row["horizon"] = "unknown"
+
+    temporary = COMPLETED_TRADES_FILE.with_suffix(".csv.migrating")
+
+    with temporary.open(mode="w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=COMPLETED_TRADE_COLUMNS,
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    os.replace(temporary, COMPLETED_TRADES_FILE)
+
+
 def initialize_trade_journal() -> Path:
     """
     Create both journal files when needed.
@@ -136,7 +194,9 @@ def initialize_trade_journal() -> Path:
                 reader = csv.reader(completed_file)
                 header = next(reader, [])
 
-            if header != COMPLETED_TRADE_COLUMNS:
+            if header == LEGACY_COMPLETED_TRADE_COLUMNS:
+                _migrate_completed_header()
+            elif header != COMPLETED_TRADE_COLUMNS:
                 raise RuntimeError(
                     f"{COMPLETED_TRADES_FILE.name} has an "
                     "unexpected header. Back up the file before "
@@ -367,11 +427,15 @@ def record_completed_trade(
     market_regime: str,
     confidence: int,
     paper_trade: bool = True,
+    horizon: str = "unknown",
 ) -> dict[str, Any]:
     """
     Permanently record one completed trade in completed_trades.csv.
 
-    This signature matches trade_manager.py v0.5.
+    `horizon` is the holding period the trade was ENTERED for — see
+    trade_horizon.py. It defaults to "unknown" so a caller that predates
+    horizons cannot mislabel a trade by omission, which matters because
+    the whole purpose of the column is grouping results by it.
     """
 
     normalized_trade_id = normalize_text(trade_id)
@@ -464,7 +528,10 @@ def record_completed_trade(
     ) as completed_file:
         reader = csv.DictReader(completed_file)
 
-        if reader.fieldnames != COMPLETED_TRADE_COLUMNS:
+        if reader.fieldnames not in (
+            COMPLETED_TRADE_COLUMNS,
+            LEGACY_COMPLETED_TRADE_COLUMNS,
+        ):
             raise RuntimeError(
                 f"{COMPLETED_TRADES_FILE.name} has an "
                 "unexpected header."
@@ -526,6 +593,7 @@ def record_completed_trade(
         "confidence": int(confidence),
         "paper_trade": bool(paper_trade),
         "journal_version": TRADE_JOURNAL_VERSION,
+        "horizon": (normalize_text(horizon).lower() or "unknown"),
     }
 
     try:

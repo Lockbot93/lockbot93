@@ -1570,15 +1570,22 @@ def build_tools() -> list:
         shadow, and options (options_manager, which is the stop loss —
         forcing a pass is a safety action, not a risk).
 
-        Three are gated with the trading tools because they CAN place
-        orders: scanner, options_scan, rearm.
+        timestop is the same case as options: equity_time_stop.py closes
+        day-horizon positions before the bell, and it only acts when its
+        own rules say a position is due. Forcing a pass can bring an exit
+        forward but can never open anything, so it is operational rather
+        than order-placing.
+
+        Three are gated with the trading tools because they CAN open a
+        position or place a resting order: scanner, options_scan, rearm.
 
         Use it to force a scan, rebuild the universe, resolve shadow
         trades, or re-check option stops without waiting for the cycle.
 
         Args:
             name: One of scanner, manager, monitor, health, options,
-                options_scan, universe, volatility, shadow, rearm.
+                options_scan, universe, volatility, shadow, rearm,
+                timestop.
         """
 
         from lockbot_process import COMPONENTS, run_component
