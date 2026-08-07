@@ -457,6 +457,15 @@ CONVERSATION_LOG_FILE = PROJECT_FOLDER / "conversation_log.jsonl"
 # over or to be told when they were applied.
 AGENT_CHANNEL_FILE = PROJECT_FOLDER / "agent_channel.jsonl"
 
+# Who decided what, between LOCKBOT and whoever edits its code. Added
+# 2026-08-06 when LOCKBOT was given binding veto and halt authority over
+# changes to the project. Vetoes, the engineer's overrides of them, halts,
+# the agenda LOCKBOT keeps, and departures from it. See governance.py and
+# GOVERNANCE.md.
+#
+# Nothing in the trading path reads this file. It cannot affect a cycle.
+GOVERNANCE_FILE = PROJECT_FOLDER / "governance.jsonl"
+
 # Push to the phone when LOCKBOT files something needing a code change.
 #
 # LOCKBOT can reach its engineer but cannot summon one: items sit in the

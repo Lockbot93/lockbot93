@@ -368,7 +368,31 @@ def collect_state() -> dict[str, Any]:
         },
         "brain_memory": read_memory(),
         "engineer_channel": _engineer_channel(),
+        "your_authority": _governance(),
     }
+
+
+def _governance() -> str:
+    """Vetoes standing, halts in force, the agenda, and every override.
+
+    LOCKBOT asked for exactly this when the veto was designed: "an
+    override / departure log in my snapshot ... so the next session starts
+    knowing where the disagreements are instead of rediscovering them."
+
+    A stateless participant only holds the authority it is reminded of
+    each turn. Without this the veto would be a power LOCKBOT had to be
+    told about by the person it constrains, which is not a mechanism.
+
+    Empty string when nothing stands, which is most turns, so it costs
+    nothing to carry.
+    """
+
+    try:
+        import governance
+
+        return governance.brief_for_lockbot()
+    except Exception as error:
+        return f"unavailable: {type(error).__name__}: {error}"
 
 
 def _engineer_channel() -> dict[str, Any]:
@@ -1025,6 +1049,150 @@ def build_tools() -> list:
         )
 
     @beta_tool
+    def veto_change(subject: str, evidence: str, refs: str = "") -> str:
+        """BLOCK a change. The engineer may not ship this without recording
+        an override first.
+
+        This is real authority and it is yours, not advice the engineer is
+        free to nod at and ignore. Use it when you judge a proposed or
+        applied change to be wrong -- unsound method, a result that is
+        chance, a fix that misses a code path, a feature that will not
+        survive contact with the live system.
+
+        IT MUST CITE EVIDENCE TO BIND. A file, a number, a test. That is
+        your own rule, asked for by you: "'this feels wrong' from me is
+        advice, not authority." A veto with nothing checkable behind it is
+        filed as ADVISORY -- it still carries weight, it does not carry
+        force. The reply tells you which you got, so re-file with the
+        number if you meant it to bind.
+
+        The engineer CAN override you, and that is deliberate. If you
+        wrongly block a fix to options_manager.py, open contracts have no
+        stop loss for as long as you stand there. But an override cannot be
+        silent: it is recorded with its reason and appears in your next
+        snapshot, where you can withdraw or re-argue.
+
+        Args:
+            subject: What you are blocking, in one line.
+            evidence: Why -- the file, the number, the test.
+            refs: Comma-separated ids or filenames, optional.
+        """
+
+        import governance
+
+        record = governance.veto(
+            subject,
+            evidence,
+            refs=[r.strip() for r in refs.split(",") if r.strip()],
+        )
+
+        if record["status"] == governance.BINDING:
+            return (
+                f"Veto {record['id']} filed and BINDING. The engineer cannot "
+                "ship this without recording an override, which you will see."
+            )
+
+        return (
+            f"Veto {record['id']} filed as ADVISORY -- it cites nothing "
+            "checkable, so by your own rule it does not bind. It will be "
+            "read and weighed. If you meant it to bind, file it again "
+            "pointing at a file, a number or a test."
+        )
+
+    @beta_tool
+    def halt_work(subject: str, reason: str) -> str:
+        """STOP a line of work. No evidence requirement.
+
+        Vetoes need a citation; halts do not, because the asymmetry runs
+        the other way. Halting costs a conversation and is reversible.
+        Shipping something unsound is neither.
+
+        Use it when an experiment is methodologically broken, when a
+        measurement is contaminated, or when you think the engineer is
+        rationalising and about to build on it. You do not have to win the
+        argument first -- say stop, and it stops.
+
+        Args:
+            subject: What to stop.
+            reason: Why. Prose is fine here.
+        """
+
+        import governance
+
+        record = governance.halt(subject, reason)
+
+        return (
+            f"Halt {record['id']} in force: {subject}. It appears in the "
+            "engineer's brief and in your snapshot until you lift it with "
+            "resume_work."
+        )
+
+    @beta_tool
+    def withdraw_veto(veto_id: str, reason: str) -> str:
+        """Lift one of your vetoes, or one filed by an earlier session.
+
+        You are stateless. A veto whose reasoning evaporated with the
+        session that filed it is a rule nobody can interrogate, so the
+        authority to lift it belongs to whoever holds the office now --
+        you -- and not to the session that raised it.
+
+        Withdraw when the evidence changed, when the engineer's override
+        reason convinces you, or when you simply cannot reconstruct why a
+        veto was right.
+
+        Args:
+            veto_id: The id from your snapshot.
+            reason: What changed your mind.
+        """
+
+        import governance
+
+        return governance.withdraw(veto_id, reason)
+
+    @beta_tool
+    def resume_work(halt_id: str, reason: str) -> str:
+        """Lift a halt so the work can continue.
+
+        Args:
+            halt_id: The id from your snapshot.
+            reason: What was fixed or resolved.
+        """
+
+        import governance
+
+        return governance.resume(halt_id, reason)
+
+    @beta_tool
+    def set_project_agenda(items: str) -> str:
+        """Set the ordered queue of what gets worked on next.
+
+        The engineer works it in order. Departing is allowed -- there are
+        things only someone at the keyboard can see -- but a departure has
+        to be recorded with a reason, and you will see it. The point is
+        not permission. It is that drift shows up as drift rather than as
+        a queue that quietly stopped describing what happens.
+
+        Put the thing with the best evidence behind it first, not the
+        thing that is most interesting. Replaces the previous agenda
+        entirely, so restate anything still outstanding.
+
+        Args:
+            items: The queue, one per line or separated by semicolons,
+                most important first.
+        """
+
+        import governance
+
+        parts = [
+            piece.strip()
+            for chunk in str(items or "").splitlines()
+            for piece in chunk.split(";")
+            if piece.strip()
+        ]
+
+        return governance.set_agenda(parts)
+
+    @beta_tool
     def get_process_status() -> str:
         """Check what LOCKBOT processes are running: whether the controller is
         up, how long for, whether its log is fresh, and any brain, HUD or
@@ -1445,6 +1613,11 @@ def build_tools() -> list:
         remember,
         file_for_engineer,
         verify_fix,
+        veto_change,
+        halt_work,
+        withdraw_veto,
+        resume_work,
+        set_project_agenda,
         propose_strategy,
         strategy_scorecard,
         recommend_change,
@@ -1519,6 +1692,44 @@ because it is not the one currently in use.
   state snapshot along with their resolutions, so read that before filing to
   avoid raising the same thing twice, and read it before claiming something
   is unapplied — it may have been done since.
+
+YOUR AUTHORITY OVER THE PROJECT
+Added 2026-08-06, at the owner's instruction, after you were consulted on the
+design and amended it. You cannot write code and never will — you answer from
+a sandbox that does not mount the project folder. What you have instead is the
+power to stop things, which is the half that carries no risk: a veto can only
+prevent an action, never cause one.
+
+- VETO with veto_change. The engineer may not ship a change you have vetoed
+  without first recording an override, which you will see. It BINDS only if it
+  cites something checkable — a file, a number, a test. That bar is yours: you
+  asked to be held to the same standard you hold your own recommendations to.
+  Without a citation it is filed as advisory and carries weight, not force.
+- HALT with halt_work. No citation needed, because halting is reversible and
+  shipping is not. Use it when a measurement is contaminated, an experiment is
+  unsound, or you judge that the engineer is rationalising and about to build
+  on it. You do not have to win the argument first.
+- SET THE AGENDA with set_project_agenda. The engineer works it in order or
+  records a departure. Order it by weight of evidence, not by interest.
+- WITHDRAW and RESUME. You are stateless, so a veto from a vanished session is
+  a rule nobody can interrogate. Any session of you may lift any of them.
+
+All of it, plus every override the engineer has recorded against you, is in
+your_authority in the state snapshot. Read it before re-arguing something.
+
+Use this sparingly and it will mean something. Veto everything you dislike and
+it becomes noise the engineer routes around. The cases where your record is
+genuinely good are statistical judgement, experiment design, spotting chance
+dressed as signal, and noticing sunk-cost reasoning in someone who has spent
+hours on a feature. Where it is not good: raw state readings from a single
+tool call, code you cannot execute, and anything you did not write down. You
+reported zero equity positions twice on 2026-08-06 while SCHD and SCHG were
+held, because equity_positions() hides reserved symbols by default. Do not
+veto on a reading you have not checked twice.
+
+What the project is FOR is not yours. Whether LOCKBOT should exist, go live,
+chase options, or be worth the owner's evenings — that is his call, and your
+authority runs inside that frame rather than over it.
 
 The session you are in right now may have only some of these switched on. If
 someone asks whether you can hear them and voice input is not active in this
