@@ -192,3 +192,29 @@ safe to edit or prune by hand.
 - **2026-08-06 22:52** — 2026-08-07: Governance module audited on day one — sound, not vetoed; two items filed (9708bab4: corrupt/deleted governance.jsonl silently reads as "Nothing standing" and MAX_SCAN_LINES drops the newest records; 227c9271: advisory vetoes surface in no brief after filing); evidence heuristic accepted as-is (any digit or ref binds — errs toward binding by design); standing condition on the 5,856-rule ADX/DI sweep: ~293 expected false passes at p<0.05, so any pass is a held-out-replication candidate only, and I halt if one heads toward capital unreplicated; first agenda set (journal pollution, backup, crypto shadow wiring, PCG-sequenced $600 reset, time-of-day, vol-scaled).
 
 - **2026-08-06 22:59** — 2026-08-07 governance rulings: (1) advisories are capped-with-visible-count, never aged out — engineer's departure from my aging suggestion confirmed correct, aging is the 9708bab4 defect class and withdraw() is the disposal path for stale ones; (2) _is_checkable should bind on filename/ref at any length but keep the 25-char floor for the bare-digit path (acceptance: "governance.py line 1" binds, "I'm 100% sure" stays advisory) — awaiting engineer pickup.
+
+- **2026-08-07 09:54** — 2026-08-07: The 8e24ae42 ratio-sweep acceptance test CANNOT run from a brain session started before the fix landed — the session's tool schema lacks the ratio parameter and its loaded strategy_lab module is pre-change (scorecard prints no ratio section, proposal payload lacks new fields); the code on disk is verified correct by source read, so on the next fresh brain session run sweep_reward_ratios on the loose EMA21-pullback control at 1:1/3:1 and only then verify_fix; also the stale session scored that control 13.2%/n=365 vs the recorded 27.7%/n=2,890, likely old symbol pool — distrust lab numbers from stale sessions.
+
+- **2026-08-07 13:42** — User directive 2026-08-07: speak plainly and simply from now on — short sentences, no elaborate framing, lead with the answer.
+
+- **2026-08-07 15:31** — FAILURE: The 7-day incident window is empty for the second consecutive pass — zero occurrences, zero fingerprints. Nothing is recurring, no LOCKBOT defect is active, and no environment failure occurred; the session-boundary health-check cluster stays dormant as recorded on 08-04.
+
+- **2026-08-07 15:31** — PCG260821P00017500 closed 2026-08-07 at exactly $84.00 (+50.0%, +$28) but with reason NEAR_EXPIRY, not TAKE_PROFIT — the trapped gain was realized by the 14-DTE rule, so whether the fixed +50% comparison actually fires live remains unconfirmed (either the value never re-touched $84 until the DTE close, or NEAR_EXPIRY is checked first in decide_exit's priority order — a one-line source read of options_manager.py would settle which).
+
+- **2026-08-07 15:31** — The IBIT260828C00036000/36500 spread exited TAKE_PROFIT at +57.7% (+$15) on 2026-08-07 — the first multi-leg LOCKBOT-owned take-profit to complete end to end.
+
+- **2026-08-07 15:31** — Both option positions are now closed and no equity or option positions are tracked, so the agenda precondition for the $600 reset (PCG resolves, both options closed cleanly through options_manager) is met — but verify reserved-symbol positions (SCHD/SCHG sleeve) before treating the book as flat, per the 08-06 failure note.
+
+- **2026-08-07 15:31** — The realized options ledger since 07-30 nets +$40 across 11 attempts (3 take-profits +$82, 4 stops −$42, 4 unfilled at $0), and equity is $270.16 — up from $252.93 on 08-04 and +$20 above the $250 start.
+
+- **2026-08-07 15:31** — Shadow resolved grew 141→162 with 27 wins (16.7%, −0.50R, Wilson 95% upper ≈23%); only 2 wins in the marginal 21, and the post-08-03 cohort is now 4/55 (7.3%) — the deterioration is deepening, not stabilizing.
+
+- **2026-08-07 15:31** — Regime split at n=162 is STRONG_UPTREND 9/75 (12.0%, −0.64R) vs WEAK_UPTREND 18/87 (20.7%, −0.38R), two-tail p≈0.14 — the gap narrowed slightly and significance loosened again; the n≈200 decision checkpoint is 38 resolutions away.
+
+- **2026-08-07 15:31** — DAILY_LOSS_LIMIT_REACHED fell from 3,871 to 52 of the last 4,000 signal rows — the near-total lockout recorded on 08-04 has ended.
+
+- **2026-08-07 15:31** — New engineer item a002c6a0 filed 2026-08-07 carries a user directive: the live engine must support a mix of day trades, swings, and overnight holds, and it currently has no holding-horizon concept at all.
+
+- **2026-08-07 17:40** — 2026-08-07 RECURRING FAILURE, third occurrence: equity_positions() default hides reserved symbols (SCHD/SCHG sleeve), and this time it produced a false claim inside engineer item 1f17678a ("sleeve never traded") whose specified fix would have wiped the sleeve's only real trade records — the engineer caught it and kept the 2 real purchase events. NEVER assert anything about the equity book, in chat or in a filed item, without reading positions with reserved symbols included.
+
+- **2026-08-07 17:40** — 2026-08-07 ADX/DI sweep verdict (ruled by brain): 5,856 rules, 783 measurable, zero cleared breakeven at the 2:1/78-bar day bracket — but random entry (10.8%, -0.68R) and always-long (9.3%, -0.72R) failed the same holdout, so breakeven was unreachable for ANY entry and the zero measures the exit structure, not ADX/DI. Establishes only that no ADX/DI conjunction rescues the fixed 2:1 day bracket; does NOT establish ADX/DI carries no information (finalists' holdout win rates ~2x random on too few trades, never scored rule-minus-control). Do not re-propose at 2:1 day; retest only under variable-ratio machinery scored against seeded control, multiplicity budget ~783. All future sweeps must score rule-minus-control per the 8e24ae42 design decision — breakeven-vs-rule scoring under this bracket is void as an absolute test.

@@ -623,6 +623,56 @@ Do not build entry-side features on the current signal. Cost and hazard
 controls (spread, IV, theta, event risk) are still worth having, because
 they reduce what a bad trade costs and do not depend on the signal working.
 
+## ADX/DI: 5,856 rules, and the number that came back is the bracket's
+
+`add_indicators` has computed `adx`, `plus_di` and `minus_di` on every bar
+since the project began, and `strategy_lab.FIELDS` never listed them — so
+no rule could reference them. The entire 864-rule space was blind to trend
+STRENGTH and directional pressure. Every condition it contained asks where
+price sits relative to an average or whether momentum is rising; none asked
+how hard the market was moving. Unlocked, the space went 864 → 5,856.
+
+    rules tested                       5,856
+    dropped for too few trades         5,073   (87%)
+    ranked                               783
+    CLEARED BREAKEVEN IN TRAINING          0
+    expected to clear on chance alone    293
+
+    controls, same holdout bars
+      always_long      633 trades    9.3%   -0.72R
+      random_entry     427 trades   10.8%   -0.68R
+
+**Zero against an expectation of 293 is not "nothing found" — it is worse
+than a random pile, and that is the tell.** The controls failed the same
+holdout catastrophically. Breakeven was unreachable for ANY entry over that
+window, so the zero measures the exit structure rather than the indicators.
+This is the 2:1-over-78-bars geometry already measured: ~94% of entries
+never touch either band, which caps the win rate far below 33.3% no matter
+what the entry does.
+
+LOCKBOT's verdict, filed as `b1e9157b` and worth quoting because it refuses
+to overclaim in the direction the result invites:
+
+> Establishes: no ADX/DI conjunction rescues the fixed 2:1 day bracket.
+> Does NOT establish ADX/DI carries no information — the family was never
+> scored rule-minus-control, and finalists' holdout win rates ran roughly
+> double random's on too few trades to read.
+
+So this is the fifteenth family only in the narrow sense. **Do not re-propose
+ADX/DI at this exit structure.** A retest is legitimate ONLY under the
+variable-ratio machinery (`8e24ae42`), scored against a seeded control on the
+same bars, counting against a multiplicity budget of ~783 rather than 5,856.
+
+**The process lesson, which binds the next sweep.** 87% of rules were dropped
+for too few trades: the ADX/DI conditions are conjunctive on top of the
+existing four, so most of the 4,992 new rules are too narrow for the
+available history to measure. The search grammar over-conjuncts. Fix that
+before the time-of-day sweep, or that run spends its compute measuring the
+sample floor instead of the hypothesis.
+
+And the standing verdict does not move. LOCKBOT: *"The exhaustion verdict
+predicted this outcome; a prediction coming true doesn't weaken it."*
+
 ## VWAP never reset, so backtests tested a different bot (fixed 2026-08-06)
 
 `add_indicators` computed VWAP as a plain `cumsum()` over the whole

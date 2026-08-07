@@ -12,7 +12,7 @@ can re-read it in a month when the details have faded.
 
 LOCKBOT works. The strategy doesn't.
 
-Over five days we tested nine different ways of deciding what to trade. Every
+Over five days we tested ten different ways of deciding what to trade. Every
 single one lost to doing nothing at all. Not "underperformed slightly" — lost
 to picking stocks at random, which we measured directly rather than assumed.
 
@@ -45,7 +45,7 @@ Everything below is an attempt to answer that honestly.
 
 ---
 
-## The nine things we tested
+## The ten things we tested
 
 Each was measured against a **control** — usually "enter at random" or "hold
 everything." That comparison is the whole point. A strategy can look
@@ -97,6 +97,30 @@ You asked to see the whole market. We tested it for free first, using
 historical full-market data. **The strategy got worse** — 33.8% down to 31.0%.
 The extra data generated more signals, and the extra signals lost money. A
 $99/month subscription would have bought a worse strategy.
+
+**10. Trend strength — the one thing the bot had never been allowed to ask.**
+Every rule we'd ever tested asked *where* the price was. None asked *how hard
+the market was moving*, even though the bot had been calculating that on every
+bar since the day it was built — the search simply couldn't see those numbers.
+We unlocked them and tested 5,856 rules instead of 864.
+
+Nothing cleared the bar. But the interesting part is *why*, and it isn't what
+it looks like: entering **completely at random** also failed badly over the
+same period. When random entry loses that heavily, no entry rule could have
+won — the profit target simply wasn't reachable in the time the bot allows a
+trade to run. So that test measured the bot's exit settings, not trend
+strength.
+
+LOCKBOT's own verdict was more careful than mine, and it's worth repeating
+because it refuses the easy conclusion: this proves no trend-strength rule
+rescues the current 2:1 target, and it does **not** prove trend strength is
+useless. That question is still open, and re-asking it properly needs the
+variable-target machinery we haven't built yet.
+
+One practical lesson came out of it too: 87% of those 5,856 rules were thrown
+out for producing too few trades to measure. Stacking more conditions makes a
+rule so specific it almost never triggers. That has to be fixed before the
+next search, or we'd spend the time measuring our own sample size again.
 
 ---
 
@@ -226,7 +250,7 @@ The two option positions expire 21 and 28 August and close themselves.
 ## What I'd tell you if you asked me straight
 
 **The trading engine doesn't work, and I can't see what would make it work
-from here.** That's not one failed idea — it's nine, each measured against a
+from here.** That's not one failed idea — it's ten, each measured against a
 control, on data corrected for four separate bugs.
 
 **The thing that won every single comparison was buying and holding an index
