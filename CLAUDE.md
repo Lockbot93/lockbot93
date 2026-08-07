@@ -245,6 +245,59 @@ The lesson is not about targets. It is that "many small losses, few huge
 wins" requires the huge wins to be reachable, and on this universe and
 holding period they are not.
 
+## News was the first input to clear the bar, and it failed (2026-08-06)
+
+Both LOCKBOT and I concluded nothing available cleared conditions (a)
+and (b) below. **Neither of us had checked.** The Alpaca surface carries:
+
+    news API               5 years of history, 100% universe coverage,
+                           median 24 articles per symbol per quarter
+    historical option bars 227 daily bars per contract
+    corporate actions      cash dividends, spin-offs
+
+News is not derived from OHLCV bars and is testable across years, so it
+cleared (a) and (b) — the first thing all week to do so. The verdict we
+had both signed off on was premature, and the lesson is to check the
+data surface rather than reason about it.
+
+Tested with acceptance criteria pre-registered by LOCKBOT BEFORE any
+result was seen: 500+ resolved events, 3+ years, no year over 40%, same
+sign every year, and >= +0.10R over a PRICE-MATCHED control.
+
+The price-matched control was LOCKBOT's idea and it is the important
+part. News follows price, so "buy the news spike" can beat random entry
+purely by rediscovering momentum through a more expensive data source.
+Matching on day-T return with no news isolates what the headline adds.
+
+    series           n      win     mean R
+    news spike     448    41.1%    -0.073
+    random entry   453    49.2%    +0.088
+    price-matched  450    48.9%    +0.081
+
+    vs random          -0.161R
+    vs price-matched   -0.154R   (needed +0.10)
+
+Negative in all four years: -0.061, -0.223, -0.015, -0.340. Buying
+attention spikes is measurably WORSE than entering at random.
+
+Note the price-matched control landed at +0.081R against random's
++0.088R — indistinguishable. So no momentum effect was hiding here
+either; the news itself is what hurts.
+
+**One observation, and the discipline that goes with it.** The edge is
+consistently negative, which raises the obvious question of whether the
+inverse is a signal. Testing that now would be post-hoc fishing of
+exactly the kind the pre-registration exists to prevent. If it is ever
+tested it needs its own pre-registration and its own held-out years
+BEFORE anyone looks at a result.
+
+Lookahead rules used, also pre-registered: counting window closes at day
+T's market close, entry at the T+1 open, articles after the T+1 open
+excluded outright, articles within 30 minutes of T's close excluded
+because created_at can lag the wire.
+
+`news_signal.py` holds the harness and its 11 self-tests.
+
 ## THE BAR: what a new strategy idea must clear before it is worth testing
 
 Set by LOCKBOT on 2026-08-06, when asked directly whether it had any
