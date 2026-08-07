@@ -311,6 +311,10 @@ def record_proposal(spec: dict, result: dict | None, verdict: str) -> None:
         # different experiments -- and inflates its own denominator,
         # which is the one thing that scorecard exists to keep honest.
         "horizon": (result or {}).get("horizon", DEFAULT_HORIZON),
+        # Recorded at the top level for the same reason horizon is: the
+        # lab scored everything at 2:1 for 17 proposals, and a scorecard
+        # that pools ratios reports several experiments as one.
+        "reward_ratio": (result or {}).get("reward_ratio", 2.0),
         "result": result or {},
     }
 
@@ -402,6 +406,33 @@ def generator_scorecard() -> str:
             "have not been compared across holding windows."
         )
 
+    # And by exit ratio, for the same reason. 17 proposals were scored at
+    # 2:1 before anything else was tried; pooling ratios would hide that.
+    by_ratio: dict[str, dict[str, int]] = {}
+
+    for row in rows:
+        ratio = row.get("reward_ratio") or row.get(
+            "result", {}).get("reward_ratio", 2.0)
+        bucket = by_ratio.setdefault(f"{float(ratio):.2f}:1", {})
+        bucket[row["verdict"]] = bucket.get(row["verdict"], 0) + 1
+
+    if len(by_ratio) > 1:
+        lines.append("")
+        lines.append("By exit ratio:")
+
+        for ratio in sorted(by_ratio):
+            counts = by_ratio[ratio]
+            total = sum(counts.values())
+            lines.append(f"  {ratio:<10} {total:>3} proposal(s), "
+                         f"{counts.get('PROMISING', 0)} promising")
+    elif by_ratio:
+        only = next(iter(by_ratio))
+        lines.append("")
+        lines.append(
+            f"  Every proposal was scored at {only}. The exit structure "
+            "is the one constant\n  across all of them and has not been "
+            "varied.")
+
     return "\n".join(lines)
 
 
@@ -453,15 +484,38 @@ def evaluate(spec: dict, frames: dict, *, reward_ratio: float = 2.0,
     decided = result.decided()
     days, concentration = backtest.concentration(result)
 
+    # Timeout-inclusive expectancy.
+    #
+    # A wider target resolves less often, so measuring only DECIDED
+    # trades conditions on resolution and flatters wide ratios: the
+    # trades that never got anywhere simply vanish from the average.
+    # Counting a timeout as 0R keeps the denominator honest across
+    # ratios, which is the whole point of sweeping them.
+    # Raised by LOCKBOT when this was consulted.
+    all_trades = result.trades
+    timeouts = [t for t in all_trades if t.outcome == backtest.OUTCOME_OPEN]
+
+    expectancy_all = (
+        sum(t.r_multiple for t in decided) / len(all_trades)
+        if all_trades else 0.0
+    )
+
     payload = {
         "horizon": horizon,
+        "reward_ratio": reward_ratio,
         "max_bars_held": max_bars,
         "stop_percent": stop,
+        "target_percent": round(stop * reward_ratio, 4),
         "trades": len(decided),
+        "entries": len(all_trades),
+        "timeouts": len(timeouts),
+        "timeout_share": round(
+            len(timeouts) / len(all_trades), 3) if all_trades else 0.0,
         "days": days,
         "busiest_share": round(concentration, 3),
         "win_rate": round(result.win_rate(), 4),
         "expectancy_r": round(result.expectancy(), 4),
+        "expectancy_all_r": round(expectancy_all, 4),
         "breakeven": round(backtest.breakeven_rate(reward_ratio, 1.0), 4),
     }
 
@@ -475,6 +529,148 @@ def evaluate(spec: dict, frames: dict, *, reward_ratio: float = 2.0,
         return "PROMISING", payload
 
     return "NEGATIVE", payload
+
+
+def sweep_reward_ratios(
+    spec: dict,
+    frames: dict,
+    *,
+    horizon: str = DEFAULT_HORIZON,
+    ratios: tuple[float, ...] = (1.0, 1.5, 2.0, 3.0),
+) -> list[dict]:
+    """Score one rule across exit ratios, each against its own control.
+
+    WHY THE CONTROL IS PER RATIO
+
+    Filed by LOCKBOT as item 8e24ae42: the lab scored every proposal at a
+    fixed 2:1, so breakeven was always 33.3% and 17 failures shared one
+    untested constant. Sweeping the ratio is the obvious fix and it has a
+    trap.
+
+    Breakeven IS what a driftless random walk scores. At 1:1 breakeven is
+    50% and random entry also scores about 50%; at 3:1 both are 25%. So
+    "the rule cleared breakeven at 1:1" can be arithmetic rather than
+    edge -- exactly how the lab universe change read as a 167%
+    improvement while the gap to random widened.
+
+    So a random-entry control runs at EVERY ratio on identical bars, and
+    what is reported is rule minus control. The question becomes "is
+    there a ratio at which this entry adds something", not "is there a
+    ratio at which the arithmetic flatters it".
+
+    Four ratios, deliberately. At four tests one false pass at p<0.05 is
+    already about 18% likely, and wider sweeps buy noise.
+    """
+
+    import backtest
+
+    ok, why = validate_spec(spec)
+
+    if not ok:
+        return [{"reward_ratio": None, "error": why}]
+
+    rule = compile_spec(spec)
+    settings = HORIZONS.get(horizon, HORIZONS[DEFAULT_HORIZON])
+    stop = settings["stop_percent"]
+    max_bars = settings["max_bars_held"]
+
+    def random_entry(row, trend):
+        """Deterministic pseudo-random entry, reproducible across runs."""
+        key = int(abs(row["close"]) * 1000) + int(abs(row["rsi"]) * 10)
+        return "BUY_LONG" if key % 40 == 0 else "NO_TRADE"
+
+    rows = []
+
+    for ratio in ratios:
+        results = backtest.run_rules(
+            frames,
+            {"rule": rule, "control": random_entry},
+            stop_percent=stop,
+            reward_ratio=ratio,
+            max_bars_held=max_bars,
+        )
+
+        scored = {}
+
+        for result in results:
+            decided = result.decided()
+            entries = result.trades
+            wins = sum(1 for t in decided
+                       if t.outcome == backtest.OUTCOME_TARGET)
+
+            scored[result.name] = {
+                "entries": len(entries),
+                "decided": len(decided),
+                "timeout_share": (
+                    sum(1 for t in entries
+                        if t.outcome == backtest.OUTCOME_OPEN) / len(entries)
+                    if entries else 0.0),
+                "win_rate": wins / len(decided) if decided else 0.0,
+                "expectancy_all_r": (
+                    sum(t.r_multiple for t in decided) / len(entries)
+                    if entries else 0.0),
+            }
+
+        rule_score = scored.get("rule", {})
+        control_score = scored.get("control", {})
+
+        rows.append({
+            "reward_ratio": ratio,
+            "breakeven": round(backtest.breakeven_rate(ratio, 1.0), 4),
+            "stop_percent": stop,
+            "target_percent": round(stop * ratio, 4),
+            "rule": rule_score,
+            "control": control_score,
+            "edge_win_rate": round(
+                rule_score.get("win_rate", 0.0)
+                - control_score.get("win_rate", 0.0), 4),
+            "edge_expectancy": round(
+                rule_score.get("expectancy_all_r", 0.0)
+                - control_score.get("expectancy_all_r", 0.0), 4),
+        })
+
+    return rows
+
+
+def describe_sweep(rows: list[dict]) -> str:
+    """The sweep as a table, with the control beside every ratio."""
+
+    if not rows or rows[0].get("error"):
+        return f"sweep failed: {rows[0].get('error') if rows else 'no rows'}"
+
+    lines = [
+        f"  {'ratio':>6} {'target':>7} {'b/e':>6} "
+        f"{'rule win':>9} {'ctrl win':>9} {'edge':>7} "
+        f"{'rule R':>8} {'ctrl R':>8} {'edge R':>8} {'timeout':>8}",
+        "  " + "-" * 88,
+    ]
+
+    for row in rows:
+        rule, control = row["rule"], row["control"]
+        lines.append(
+            f"  {row['reward_ratio']:>5.2f} {row['target_percent']:>6.1%} "
+            f"{row['breakeven']:>5.1%} "
+            f"{rule.get('win_rate', 0):>8.1%} "
+            f"{control.get('win_rate', 0):>8.1%} "
+            f"{row['edge_win_rate']:>+6.1%} "
+            f"{rule.get('expectancy_all_r', 0):>+8.3f} "
+            f"{control.get('expectancy_all_r', 0):>+8.3f} "
+            f"{row['edge_expectancy']:>+8.3f} "
+            f"{rule.get('timeout_share', 0):>7.0%}"
+        )
+
+    best = max(rows, key=lambda r: r["edge_expectancy"])
+
+    lines.append("")
+    lines.append(
+        f"  Best ratio by edge over control: {best['reward_ratio']:.2f} "
+        f"({best['edge_expectancy']:+.3f}R)")
+    lines.append(
+        "  'edge' columns are rule MINUS control on identical bars. "
+        "Breakeven is\n  shown only for reference -- a random walk scores it "
+        "at every ratio.")
+
+    return "\n".join(lines)
 
 
 def _horizon_self_test(check) -> None:
