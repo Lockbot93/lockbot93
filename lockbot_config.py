@@ -87,7 +87,21 @@ LIVE_TRADING_ENABLED = False
 # off entirely would stop the clock on the one experiment that matters.
 #
 # Existing positions are unaffected — this gates new entries only.
-EQUITY_ENTRIES_ENABLED = False
+#
+# Back to True on 2026-08-07 at the owner's instruction, relayed by
+# LOCKBOT as agent_channel bd26ffca and confirmed with him directly. He
+# wants the account trading end to end and visible.
+#
+# Deliberately WITHOUT the other half of that directive: OPTIONS_SHADOW_MODE
+# stays True. That was LOCKBOT's own recommendation and the owner took it —
+# equity shadow reads 16.7% wins over 162 resolved against a 33.3%
+# breakeven, options 20.2% against a 41.2% breakeven, so options lose
+# faster per trade. Equity first cuts the expected bleed to roughly a
+# fifth while still showing the whole machine working.
+#
+# Every entry from here carries a horizon tag (trade_horizon.py), so this
+# is also the first data that can be grouped by holding period.
+EQUITY_ENTRIES_ENABLED = True
 
 # Bracket orders are LOCKBOT's sole exit mechanism. Keep this False —
 # position_monitor.py must stay monitoring/alerting only. See its
