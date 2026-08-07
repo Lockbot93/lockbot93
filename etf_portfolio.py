@@ -312,8 +312,36 @@ def fetch_holdings(symbols: list[str]) -> dict[str, int]:
         return {}
 
 
-def execute_plan(plan: Plan, *, client: Any = None) -> list[str]:
+def execute_plan(
+    plan: Plan,
+    *,
+    client: Any = None,
+    state_path: Path | None = None,
+) -> list[str]:
     """Place the plan's orders. Returns a line per attempt.
+
+    AN INJECTED CLIENT DOES NOT WRITE TO THE JOURNAL.
+
+    Filed by LOCKBOT as agent_channel 1f17678a. The self-test injects a
+    FakeClient whose orders all come back with id "fake-order", and every
+    one of those runs was journalled into the real
+    etf_portfolio_state.json. By 2026-08-06 the file held 34 events, 32 of
+    them self-test noise, and `established` was stamped 2026-08-04T23:34Z
+    by a test run rather than by the first real purchase.
+
+    Production never injects a client -- it builds its own below. So an
+    injected client means a test, and a test must not be able to write to
+    a real record. The alternative fix, pointing the self-test at a temp
+    path, was rejected: it works only for as long as everyone remembers to
+    opt in, and the whole failure here was that nobody remembered.
+
+    `state_path` is still available for a caller that genuinely wants the
+    journal redirected, and passing it re-enables writing.
+
+    ---
+
+    Refuses unless ETF_PORTFOLIO_ENABLED and ETF_PORTFOLIO_LIVE are BOTH
+    true. Two flags rather than one is deliberate: the first says the
 
     Refuses unless ETF_PORTFOLIO_ENABLED and ETF_PORTFOLIO_LIVE are BOTH
     true. Two flags rather than one is deliberate: the first says the
@@ -327,6 +355,10 @@ def execute_plan(plan: Plan, *, client: Any = None) -> list[str]:
     Sells are placed only when rebalancing says so, and never as a stop --
     this module has no stops by design.
     """
+
+    # Decided BEFORE the client is built below, because the journalling
+    # rule hangs off it and by then every path has a client.
+    injected = client is not None
 
     enabled = getattr(config, "ETF_PORTFOLIO_ENABLED", False)
     live = getattr(config, "ETF_PORTFOLIO_LIVE", False)
@@ -398,23 +430,26 @@ def execute_plan(plan: Plan, *, client: Any = None) -> list[str]:
             )
 
     # Record what was attempted. This sleeve has no journal of its own and
-    # the broker's order history is the only other trace.
-    try:
-        state = load_state()
-        state.setdefault("events", []).append({
-            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "orders": [f"{s} {q} {sym}" for sym, q, s in plan.orders],
-            "results": results,
-        })
+    # the broker's order history is the only other trace -- which is
+    # exactly why it must not be filled with fictional entries. See the
+    # docstring: an injected client is a test unless it also names a path.
+    if not (injected and state_path is None):
+        try:
+            state = load_state(state_path)
+            state.setdefault("events", []).append({
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "orders": [f"{s} {q} {sym}" for sym, q, s in plan.orders],
+                "results": results,
+            })
 
-        if not state.get("established"):
-            state["established"] = datetime.now(timezone.utc).isoformat(
-                timespec="seconds"
-            )
+            if not state.get("established"):
+                state["established"] = datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                )
 
-        save_state(state)
-    except Exception:
-        pass
+            save_state(state, state_path)
+        except Exception:
+            pass
 
     return results
 
@@ -711,6 +746,41 @@ def _self_test() -> int:
         out = execute_plan(settled, client=client)
         check("a portfolio already on target does nothing",
               not client.submitted, str(out))
+
+        # 1f17678a. The acceptance test LOCKBOT wrote for this was that
+        # the real state file be byte-identical before and after a run.
+        # Asserted here rather than checked by hand, because the bug was
+        # not that anyone got this wrong once -- it was that nothing
+        # noticed for 32 runs.
+        real_state = Path(config.ETF_PORTFOLIO_STATE_FILE)
+        before = real_state.read_bytes() if real_state.exists() else None
+
+        client = FakeClient()
+        execute_plan(buyable, client=client)
+
+        after = real_state.read_bytes() if real_state.exists() else None
+
+        check("a self-test run does not touch the real journal",
+              before == after,
+              "etf_portfolio_state.json changed during the self-test")
+
+        check("and the orders really were placed, so this is not vacuous",
+              len(client.submitted) == 2, str(client.submitted))
+
+        # But a caller that asks for a journal still gets one.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            scratch = Path(folder) / "state.json"
+            client = FakeClient()
+            execute_plan(buyable, client=client, state_path=scratch)
+
+            written = load_state(scratch)
+
+            check("an explicit state_path re-enables journalling",
+                  len(written.get("events", [])) == 1, str(written))
+            check("and stamps established on the first write",
+                  bool(written.get("established")), str(written))
 
     finally:
         config.ETF_PORTFOLIO_ENABLED = real_enabled
