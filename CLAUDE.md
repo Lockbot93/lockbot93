@@ -245,6 +245,54 @@ The lesson is not about targets. It is that "many small losses, few huge
 wins" requires the huge wins to be reachable, and on this universe and
 holding period they are not.
 
+## PRE-REGISTRATION: crypto oversold. One attempt, ever. (2026-08-06)
+
+Written by LOCKBOT, not by me, because it has caught me twice and has no
+stake in the answer being yes. Committed BEFORE any forward data exists.
+Do not reinterpret this. If a future session finds itself arguing about
+what a clause meant, the answer is no.
+
+    rule            rsi < 35, swing long, crypto
+    pool            the FULL pool including BTC and ETH
+    holdout         FORWARD ONLY -- data that does not yet exist
+    sample          n >= 300 AND >= 180 days elapsed
+    control         week-matched seeded random, seed 20260807, >= 500 draws
+    discriminator   a mirrored rsi > 65 SHORT arm, logged alongside
+
+    PASS requires ALL of:
+      edge >= +0.10R over the control
+      above the control distribution's 95th percentile
+      net > 0 after costs -- beating the control is not the same as
+        making money, and the control here is positive
+      non-negative edge in BOTH calendar halves
+
+    ANY failure kills the entire rsi-oversold-long family on crypto
+    PERMANENTLY. No variants, no re-cut thresholds, no ex-BTC/ETH
+    rescue. ONE ATTEMPT EVER.
+
+    If it passes WITHOUT the short arm also behaving, the result is
+    regime luck: shadow only, no capital.
+
+    LOCKBOT's stated prior that it passes: 0.15
+
+Why forward-only rather than a held-out slice of history: the sample it
+was found in has been looked at, and a held-out cut of the same four
+years shares the same cycle. Forward data cannot be re-cut. LOCKBOT's
+note: "the clock starts when the forward shadow logging actually starts
+running, not today's date on the document -- the registration binds from
+the first logged bar."
+
+So nothing counts until the rule and BOTH control arms are wired into a
+shadow path and logging. That is the next build, and until it runs this
+registration is a piece of paper.
+
+The reason for the severity: this is the closest result the project has
+produced (+0.187R over control, 4x anything on equities, and the only
+one measured with costs charged) and it already FAILED the earlier sign
+test at 2022 and 2026. r0315 had exactly this shape -- beat its controls,
+replicated across symbols, died across years. One attempt is what stops
+a fourteenth family becoming a fourteenth rationalisation.
+
 ## Crypto: half the direction died on costs, the rest on one year (2026-08-06)
 
 The fresh start. Crypto removes four structural constraints at once --
