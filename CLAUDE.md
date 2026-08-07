@@ -245,6 +245,59 @@ The lesson is not about targets. It is that "many small losses, few huge
 wins" requires the huge wins to be reachable, and on this universe and
 holding period they are not.
 
+## Crypto: half the direction died on costs, the rest on one year (2026-08-06)
+
+The fresh start. Crypto removes four structural constraints at once --
+PDT does not apply, sizing is fractional, it trades 24/7, and the book
+is fully visible rather than the 4% equities give.
+
+LOCKBOT reframed the question and saved a week: on equities the tenth
+question turned out to be "does entry beat random". Here the ZEROTH
+question is "does ANYTHING beat random after costs", because Alpaca
+charges ~25bps per side. Every one of the 17 failed equity families was
+measured at zero cost.
+
+    round trip = 2 x (25bp fee + 0.092% observed half-spread) = 0.683%
+
+    horizon   stop      n     gross R   cost R    net R    gate
+    day        2%    2,994    +0.083    0.342    -0.259   CLOSED
+    swing      5%    2,993    +0.032    0.137    -0.105   open
+
+**The day horizon is closed by the pre-registered gate** (drag 0.342R
+against a 0.25R limit). And note the net column: random long entries
+lose money at BOTH horizons after costs, across four years containing a
+major bull run. In crypto the friction exceeds the drift.
+
+A flaw in our own criterion, found before it could flatter anything: the
+bar was "+0.10R over the random control", but the control is NEGATIVE
+after costs, so a rule clearing it exactly would still lose money. The
+honest bar is edge > +0.105R -- it must cover friction, not just beat
+the coin.
+
+### Two candidates cleared the bar and failed the year test
+
+    rule                        net R   vs control   ex-2023
+    oversold (rsi<35)          +0.233      +0.187     +0.081
+    pullback (close<ema21)     +0.184      +0.137     -0.045
+
+Pullback is entirely 2023 -- remove one year and it loses money.
+
+Oversold is the closest thing this project has produced. It survives
+removing its best year at +0.081R, and +0.101R with BTC and ETH
+excluded. It still FAILS the pre-registered sign test: 2022 at -0.01 and
+2026 at -0.09.
+
+The honest nuance, recorded and NOT acted on: the two failing years are
+the thinnest in the sample (2022 is 9% of trades, 2026 is partial). That
+observation is exactly the rationalisation the pre-registration exists to
+block. If oversold is ever revisited it needs fresh criteria and a
+held-out year decided in advance, not this sample re-cut.
+
+Other limits LOCKBOT named that bound any crypto work: Alpaca crypto is
+long-only spot, so no short arm can ever run; and 73 pairs is misleading
+because nearly everything is beta to BTC -- effective breadth is closer
+to one and a half assets than seventy-three.
+
 ## The EXIT was never varied, and it matters (2026-08-06)
 
 Every backtest in this project used one exit: fixed stop, fixed target,
