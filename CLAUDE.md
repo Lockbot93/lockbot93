@@ -245,6 +245,53 @@ The lesson is not about targets. It is that "many small losses, few huge
 wins" requires the huge wins to be reachable, and on this universe and
 holding period they are not.
 
+## The EXIT was never varied, and it matters (2026-08-06)
+
+Every backtest in this project used one exit: fixed stop, fixed target,
+fixed time, set at entry and never moved. Its dials were swept
+thoroughly and its SHAPE never was.
+
+LOCKBOT had argued exits cannot matter -- "sizing and exits scale an
+expectation, they don't change its sign". True of symmetric exits. A
+trailing stop is asymmetric: losses capped at the initial distance,
+winners left open, which manufactures positive skew from the exit alone.
+
+**Its claim is refuted.** 5,307 seeded random entries, 60 symbols,
+3.3 years, identical bars, daily:
+
+    exit structure     entry     mean R    by year
+    fixed bracket      random    +0.093    +0.08 +0.09 +0.15 +0.02
+    trailing stop      random    +0.143    +0.08 +0.13 +0.25 +0.04
+    breakeven+trail    random    +0.143    +0.06 +0.15 +0.24 +0.04
+
+A trailing stop improves random entries by +0.05R, a 54% lift, positive
+in every year. The exit alone does work the entry does not.
+
+**But it is a better EXIT, not an edge**, and it makes the entry matter
+less rather than more:
+
+    exit structure      rule R   random R     edge
+    fixed bracket       +0.101     +0.093   +0.008
+    trailing stop       +0.096     +0.143   -0.047
+    breakeven+trail     +0.106     +0.143   -0.037
+
+The rule goes BACKWARDS relative to random under better exits, and the
+reason is mechanical rather than statistical: the rule buys pullbacks
+(close < ema_21), a mean-reversion setup, while a trailing stop wants
+trends. The entry selects against the exit.
+
+**The caveat that bounds all of it:** these are long-only entries in a
+rising market, so both columns are positive because the market rose. The
+finding is the DIFFERENCE (+0.05R), not the level. A trailing stop is
+not a strategy; it is a better way to hold whatever you already hold.
+
+Do not read the trailing-stop number as an edge. Read it as: if anything
+is ever held with a stop, trail it rather than fixing it.
+
+`exit_strategies.py` holds the three structures and 12 self-tests,
+including that an intrabar low is not rescued by the same bar's high --
+the classic way a trailing-stop backtest flatters itself.
+
 ## News was the first input to clear the bar, and it failed (2026-08-06)
 
 Both LOCKBOT and I concluded nothing available cleared conditions (a)
