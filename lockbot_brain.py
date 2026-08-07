@@ -1438,6 +1438,91 @@ def build_tools() -> list:
         return strategy_lab.generator_scorecard()
 
     @beta_tool
+    def sweep_exit_ratios(
+        name: str,
+        conditions_json: str,
+        trend: str = "ANY",
+        side: str = "BUY_LONG",
+        horizon: str = "day",
+    ) -> str:
+        """SCORE ONE RULE ACROSS EXIT RATIOS, each against its own control.
+
+        This is the lever for item 8e24ae42. The lab scored every proposal
+        at a fixed 2:1, so seventeen failures shared one untested
+        constant. This runs the same rule at 1:1, 1.5:1, 2:1 and 3:1.
+
+        WHY EVERY RATIO GETS ITS OWN CONTROL. Breakeven is also what a
+        driftless random walk scores -- 50% at 1:1, 25% at 3:1 -- so
+        "cleared breakeven at 1:1" can be arithmetic rather than edge. A
+        random-entry control runs at each ratio on identical bars and what
+        is reported is rule MINUS control.
+
+        Read the edge column, not the win rate. On the last run the
+        seductive row was 1:1 in the live pool, where the rule won 55.3%
+        against a 50% breakeven -- and the control won 53.9% on the same
+        bars.
+
+        Four ratios only. At four tests one false pass at p<0.05 is
+        already about 18% likely.
+
+        Places no orders. Same arguments as propose_strategy, minus the
+        rationale.
+        """
+
+        import json as _json
+
+        import strategy_lab
+
+        try:
+            conditions = _json.loads(conditions_json)
+        except (ValueError, TypeError) as error:
+            return f"conditions_json is not valid JSON: {error}"
+
+        spec = {
+            "name": name,
+            "trend": trend,
+            "side": side,
+            "conditions": conditions,
+        }
+
+        ok, why = strategy_lab.validate_spec(spec)
+
+        if not ok:
+            return f"REJECTED: {why}"
+
+        if horizon not in strategy_lab.HORIZONS:
+            return f"horizon must be one of {sorted(strategy_lab.HORIZONS)}."
+
+        try:
+            import backtest
+            import lab_universe
+            import lockbot_config as _cfg
+            from universe import load_universe
+
+            symbols = lab_universe.load()
+            pool = "lab"
+
+            if not symbols:
+                symbols = load_universe(_cfg.UNIVERSE_FILE)
+                pool = "live (lab pool not built)"
+
+            days = strategy_lab.HORIZONS[horizon]["history_days"]
+            frames = backtest.load_history(symbols, days=days)
+        except Exception as error:
+            return f"Could not load history: {type(error).__name__}: {error}"
+
+        if not frames:
+            return "No usable history; cannot sweep."
+
+        rows = strategy_lab.sweep_reward_ratios(spec, frames, horizon=horizon)
+
+        return (
+            f"{strategy_lab.describe_spec(spec)}\n\n"
+            f"pool: {pool}, {len(frames)} symbols, horizon {horizon}\n\n"
+            f"{strategy_lab.describe_sweep(rows)}"
+        )
+
+    @beta_tool
     def list_settings() -> str:
         """List the settings that can be changed while LOCKBOT is running,
         their allowed ranges, and which are currently overridden.
@@ -1647,6 +1732,7 @@ def build_tools() -> list:
         resume_work,
         set_project_agenda,
         propose_strategy,
+        sweep_exit_ratios,
         strategy_scorecard,
         recommend_change,
         list_recommendations,

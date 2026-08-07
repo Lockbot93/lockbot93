@@ -616,8 +616,18 @@ def sweep_reward_ratios(
                         if t.outcome == backtest.OUTCOME_OPEN) / len(entries)
                     if entries else 0.0),
                 "win_rate": wins / len(decided) if decided else 0.0,
+                # Every entry, timeouts marked to market.
+                #
+                # This summed only DECIDED trades over ALL entries, so a
+                # timeout contributed nothing to the numerator while
+                # still counting in the denominator -- booking it as
+                # exactly flat. LOCKBOT rejected 8e24ae42 over it. At
+                # 3:1, where 94% of entries time out, that assumption was
+                # most of the answer. backtest.simulate_symbol now
+                # records the timeout's actual R, so summing all entries
+                # is both honest and simpler.
                 "expectancy_all_r": (
-                    sum(t.r_multiple for t in decided) / len(entries)
+                    sum(t.r_multiple for t in entries) / len(entries)
                     if entries else 0.0),
             }
 

@@ -257,8 +257,32 @@ def simulate_symbol(
                 trades.append(open_trade)
                 open_trade = None
             elif open_trade.bars_held >= max_bars_held:
-                # Timed out flat. Left OPEN so it is excluded from the
-                # win rate rather than counted as either result.
+                # Timed out. Marked to market, NOT booked flat.
+                #
+                # Raised by LOCKBOT rejecting item 8e24ae42: r_multiple
+                # was left at its 0.0 default here, so a timed-out trade
+                # was recorded as having made exactly nothing. It did not
+                # -- it was closed at whatever the price happened to be,
+                # somewhere between the stop and the target.
+                #
+                # That mattered because sweep_reward_ratios divides the
+                # summed R by ALL entries, so every timeout pulled the
+                # average toward zero regardless of where the trade
+                # actually was. At 3:1, where 94% of entries time out,
+                # almost the whole result was that assumption.
+                #
+                # The outcome stays OPEN, so `decided()` still excludes
+                # these from the win rate. Only the expectancy changes,
+                # and only for the better: it now reflects the price.
+                entry = open_trade.entry
+                close = float(row.close)
+                risk = abs(entry - open_trade.stop)
+
+                if risk > 0:
+                    move = (close - entry if open_trade.side == "BUY_LONG"
+                            else entry - close)
+                    open_trade.r_multiple = move / risk
+
                 trades.append(open_trade)
                 open_trade = None
 
@@ -485,6 +509,15 @@ def _self_test() -> int:
                 "atr": price * 0.01,
                 "volume": 100_000.0,
                 "volume_avg_20": 80_000.0,
+                # Trend strength and directional pressure. Added to
+                # strategy_lab.FIELDS on 2026-08-06 and missing here
+                # until this check caught it -- which is the whole
+                # reason the check exists: compile_spec answers NO_TRADE
+                # on a missing key, so an ADX rule would have looked
+                # tested and worthless rather than never run at all.
+                "adx": 30.0,
+                "plus_di": 25.0,
+                "minus_di": 15.0,
             })
         return pd.DataFrame(rows)
 

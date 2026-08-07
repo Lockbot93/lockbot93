@@ -623,6 +623,74 @@ Do not build entry-side features on the current signal. Cost and hazard
 controls (spread, IV, theta, event risk) are still worth having, because
 they reduce what a bad trade costs and do not depend on the signal working.
 
+## The swing candidate and the timing overlay both failed (2026-08-07)
+
+LOCKBOT's own two proposals, from the weekend list it gave the owner. It
+ruled on both results and closed both families.
+
+**The swing candidate.** Loose pullback (`close < ema_21`) plus a trailing
+stop, on the lab pool, 5% stop, 3 years of split-adjusted daily bars,
+seeded control matched one-for-one on identical bars, 10bp/side charged.
+
+    exit               rule R    random R     edge
+    fixed bracket      +0.112     +0.092    +0.020
+    trailing stop      +0.165     +0.170    -0.004
+    breakeven+trail    +0.170     +0.173    -0.003
+
+Its rationale was "nobody has tested them together yet". They were, on
+2026-08-06, on 60 general symbols, at −0.047R under the trail. The lab
+pool was the genuinely new part and it improves the number to −0.004
+without changing the sign. **The trail lifts the random control by as much
+as it lifts the rule** (+0.078 vs +0.053) — the 08-06 conclusion
+reproduced on a different pool. A better way to hold, not an edge.
+
+The one positive cell, +0.020R under a fixed bracket, is dead too, and
+LOCKBOT's reasoning for killing it is the part worth keeping: 26,415
+entries from 78 symbols with multi-day holds means concurrent correlated
+positions on most sessions, so **effective independent observations are a
+small fraction of 26k and the standard error is several times what the
+raw n implies**. A fifth of the pre-registered bar, negative in 2026, on
+inflated n. Re-cutting it after seeing the result is the rescue behaviour
+the pre-registration forbids.
+
+**The execution-timing overlay.** Pre-registered at +0.05R over a
+*randomized-intraday-execution* control — a random TIME, not a random
+price, which is why it needs 5-minute bars: sampling between the daily low
+and high samples a price and biases toward the extremes that flatter the
+overlay. 40 lab symbols, 180 days, 3-session hold, paired so only the
+execution clock differs.
+
+    enter at close / exit at open   n=4,843   win 47.8%   R +0.0092
+    random intraday execution       n=4,843   win 48.1%   R +0.0032
+
+    edge +0.0060R against +0.0500R.  paired t = +0.66
+
+A ninth of the bar and indistinguishable from zero. Recorded as **failed**,
+not as "promising but underpowered" — LOCKBOT's ruling: that category is
+precisely what the pre-registration exists to eliminate, and a power
+extension should have been in the registration if it was wanted.
+
+So the exit-structure family is closed on equities, and the 98% overnight
+finding still has no capturable expression.
+
+## Timeouts were booked flat, and at 3:1 that was most of the answer
+
+Found by LOCKBOT rejecting `8e24ae42`. `simulate_symbol` left `r_multiple`
+at its `0.0` default when a trade timed out, so a position closed at
+whatever price happened to prevail was recorded as having made **exactly
+nothing**.
+
+`sweep_reward_ratios` then divided summed R by ALL entries, so each
+timeout pulled the average toward zero regardless of where the trade
+actually stood. At 3:1, where 94% of entries time out, that assumption was
+most of the result rather than a rounding detail.
+
+Timeouts are now marked to market. The outcome stays `OPEN`, so `decided()`
+still excludes them from the win rate — only the expectancy changes.
+
+The lesson is the one this project keeps relearning: **a default value is a
+claim.** `0.0` looked like "no data" and behaved like "broke even".
+
 ## ADX/DI: 5,856 rules, and the number that came back is the bracket's
 
 `add_indicators` has computed `adx`, `plus_di` and `minus_di` on every bar
