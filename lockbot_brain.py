@@ -536,7 +536,27 @@ def _trading_client():
 # options_manager is deliberately NOT here even though it sells: it is
 # the only stop loss open contracts have, so being able to run it
 # unattended is a safety feature rather than a risk.
-ORDER_CAPABLE_COMPONENTS = {"scanner", "options_scan", "rearm"}
+#
+# timestop IS here, and the reasoning is worth keeping because the
+# opposite conclusion looks obvious. equity_time_stop.py is an exit, and
+# options_manager is an exit, so the first instinct on adding it was to
+# leave it ungated by the same argument. That argument does not carry:
+#
+#   options_manager runs the ONLY protection an option position has, so
+#   running it can only ever add safety.
+#
+#   equity positions already carry a broker-side bracket. The time stop
+#   CANCELS that bracket and market-closes instead. It does not restore
+#   protection, it replaces a price exit with an immediate one, and it
+#   puts a real order on the wire to do it.
+#
+# There is also a concrete leak. On a failed close the module calls
+# rearm_brackets.run(arm=True) to restore protection -- and rearm is
+# gated right here. Leaving timestop open would have been a route around
+# the gate, reached through the one branch nobody exercises.
+#
+# Read-only is about money. Closing a position moves money.
+ORDER_CAPABLE_COMPONENTS = {"scanner", "options_scan", "rearm", "timestop"}
 
 
 def _guard(action: str, detail: str, *, places_orders: bool = True) -> str | None:
@@ -1570,14 +1590,15 @@ def build_tools() -> list:
         shadow, and options (options_manager, which is the stop loss —
         forcing a pass is a safety action, not a risk).
 
-        timestop is the same case as options: equity_time_stop.py closes
-        day-horizon positions before the bell, and it only acts when its
-        own rules say a position is due. Forcing a pass can bring an exit
-        forward but can never open anything, so it is operational rather
-        than order-placing.
+        Four are gated with the trading tools because they put an order
+        on the wire: scanner, options_scan, rearm, timestop.
 
-        Three are gated with the trading tools because they CAN open a
-        position or place a resting order: scanner, options_scan, rearm.
+        timestop looks like the options case and is not. options_manager
+        runs the only protection a contract has, so forcing it can only
+        add safety. equity_time_stop CANCELS a live bracket and market-
+        closes instead — it replaces a price exit with an immediate one,
+        which moves money, and on a failed close it reaches for rearm,
+        which is itself gated.
 
         Use it to force a scan, rebuild the universe, resolve shadow
         trades, or re-check option stops without waiting for the cycle.
@@ -2651,8 +2672,50 @@ def _self_test() -> int:
     check("a declined confirmation still refuses an operational action",
           refusal is not None and "declined" in refusal, str(refusal))
 
-    check("the order-capable component list names only submitters",
-          ORDER_CAPABLE_COMPONENTS == {"scanner", "options_scan", "rearm"},
+    # ---- every component that can put an order on the wire must be gated
+    #
+    # timestop was added to COMPONENTS on 2026-08-07 and left OUT of
+    # ORDER_CAPABLE_COMPONENTS, on the argument that an exit is a safety
+    # action like options_manager. It is not: equity_time_stop cancels a
+    # live bracket and market-closes, and on a failed close it calls
+    # rearm_brackets -- which is gated. A read-only session could have
+    # reached a gated component through an ungated one.
+    #
+    # Asserted from a hand-written list rather than from
+    # ORDER_CAPABLE_COMPONENTS itself, so that adding a component to the
+    # set is not enough to make this pass. Anything that submits, cancels
+    # or replaces an order belongs below.
+    CONFIRM = lambda *_: True  # noqa: E731
+
+    for component in ("scanner", "options_scan", "rearm", "timestop"):
+        check(f"{component} is gated as order-placing",
+              component in ORDER_CAPABLE_COMPONENTS,
+              f"{component} would run in a read-only session")
+
+    try:
+        from lockbot_process import COMPONENTS as _ALL
+
+        check("every gated component actually exists",
+              ORDER_CAPABLE_COMPONENTS <= set(_ALL),
+              str(ORDER_CAPABLE_COMPONENTS - set(_ALL)))
+    except Exception:
+        pass
+
+    READ_ONLY = True
+
+    for component in sorted(ORDER_CAPABLE_COMPONENTS):
+        check(f"read-only refuses to run {component}",
+              _guard("RUN", component,
+                     places_orders=component in ORDER_CAPABLE_COMPONENTS)
+              is not None)
+
+    # An exact-match assertion, deliberately. A new component must not be
+    # able to join this set by accident, and it must not be able to stay
+    # out of it by accident either -- which is exactly what happened when
+    # timestop was added on 2026-08-07 and this check caught it.
+    check("the order-capable component list is exactly the submitters",
+          ORDER_CAPABLE_COMPONENTS
+          == {"scanner", "options_scan", "rearm", "timestop"},
           str(ORDER_CAPABLE_COMPONENTS))
 
     check("options_manager is NOT gated -- it is the stop loss",
