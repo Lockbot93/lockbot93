@@ -640,6 +640,75 @@ Do not build entry-side features on the current signal. Cost and hazard
 controls (spread, IV, theta, event risk) are still worth having, because
 they reduce what a bad trade costs and do not depend on the signal working.
 
+## PRE-REGISTRATION: calendar timing. One attempt, ever. (2026-08-07)
+
+Written by LOCKBOT before any result existed, at the owner's request for
+"night trades based off the calendars". Committed BEFORE the first bar was
+loaded. Do not reinterpret it. If a future session finds itself arguing
+about what a clause meant, the answer is no.
+
+**Why this was worth running at all.** Condition (a) of THE BAR says an
+idea must use an input not derived from these OHLCV bars, and all eighteen
+dead families broke it — every one was a smoothing or a ratio of the same
+price series. **A date is not a price.** The day of the week is not a
+transformation of anything already searched, it costs nothing, and it
+needs no new subscription. Only news has cleared (a) before, and that
+failed. Earnings would also clear it and is NOT available: Alpaca's
+corporate actions endpoint returns cash dividends only on this
+subscription, probed 2026-08-07.
+
+    features    day_of_week, turn_of_month (last + first 3),
+                expiry_week            ONLY
+    dropped     month_of_year, pre_holiday — underpowered, and dropped
+                PERMANENTLY rather than deferred
+    shape       one-dimensional splits, NO conjunctions ever, 18 tests
+    PRIMARY     seeded random entries (seed 20260808, >= 500 draws)
+                IN-cell vs OUT-of-cell, costs charged, timeouts at
+                mark-to-market R
+    secondary   entry-rule filtering, run ONLY on a primary pass
+
+    PASS per cell requires ALL of:
+      edge >= +0.10R net over the out-of-cell control
+      above the control distribution's 95th percentile
+      same sign in all four years, no year above 40% of trades
+      >= 300 trades AND >= 100 distinct in-cell days
+      day-clustered significance
+      survives the overlap purge
+      vol-matched check if in/out ATR% differs by more than 20%
+
+    ANY total failure kills the calendar family on equities at BOTH
+    horizons PERMANENTLY. No re-cuts of any kind.
+
+    A single positive cell that meets less than the full bar counts for
+    NOTHING.
+
+    Any pass is SHADOW ONLY, pending forward confirmation and an
+    explicit owner decision.
+
+    LOCKBOT's stated prior that it passes: 0.10
+
+**The structural correction, which was LOCKBOT's and is the important
+part.** The obvious design compares the live rule filtered by calendar
+against the same rule unfiltered. That is wrong, and it rejected it:
+the owner's claim is about the DATE, so rule-versus-rule confounds the
+calendar with the entry logic. The primary arms are therefore RANDOM
+in-cell against RANDOM out-of-cell. The rule comparison survives only as
+a secondary on cells that have already passed.
+
+**The confound it named that I had missed: clustering.** Calendar cells
+are not independent draws — every symbol shares the same Tuesday, so a
+thousand trades on forty symbols across twenty-five Tuesdays is closer to
+twenty-five observations than to a thousand. Hence the >= 100 distinct-day
+floor and day-first averaging. The volatility confound I did raise is
+handled by the ATR check; feature correlation by the overlap purge.
+
+Why the severity: a calendar effect is the single most over-fitted claim
+in retail trading — the Santa rally, sell-in-May, the Monday effect — and
+almost all of it is published, which by McLean & Pontiff means decayed.
+Several hundred cells would guarantee a beautiful-looking Tuesday. One
+attempt is what stops a nineteenth family becoming a nineteenth
+rationalisation.
+
 ## The swing candidate and the timing overlay both failed (2026-08-07)
 
 LOCKBOT's own two proposals, from the weekend list it gave the owner. It
