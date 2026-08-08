@@ -109,6 +109,34 @@ EQUITY_ENTRIES_ENABLED = True
 ENABLE_PAPER_EXITS = False
 
 
+# Whether LOCKBOT may place orders from a REMOTE (Telegram) session.
+#
+# Set True on 2026-08-07 at the owner's explicit and repeated
+# instruction, after the trade-off was put to him directly.
+#
+# WHAT THIS GIVES UP. lockbot_telegram.py hardcoded READ_ONLY = True with
+# the reasoning that a leaked bot token must not be able to move money,
+# regardless of what is asked or how convincingly. That reasoning is
+# sound and has not been refuted — it has been overruled for a paper
+# account, which is a different judgement. The remaining access control
+# is TELEGRAM_ALLOWED_USER_IDS, an allowlist of one.
+#
+# WHY IT IS A FLAG RATHER THAN A DELETED LINE. The wall is worth being
+# able to put back in one word, and worth being visible in
+# `python lockbot_config.py` rather than buried in a handler.
+TELEGRAM_TRADING_ENABLED = True
+
+# The part that is NOT the owner's to turn off from a phone.
+#
+# Remote order authority is permitted ONLY while PAPER_TRADING is True.
+# The decision above was made about fake money; it must not silently
+# become a decision about real money the day LIVE_TRADING_ENABLED flips.
+# Anyone going live has to come back here and choose again, deliberately,
+# at a keyboard — which is the same standard PAPER_TRADING itself is
+# held to.
+TELEGRAM_TRADING_REQUIRES_PAPER = True
+
+
 # ------------------------------------------------------------
 # Holding horizons
 # ------------------------------------------------------------

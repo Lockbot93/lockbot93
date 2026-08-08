@@ -449,6 +449,61 @@ def _do_flatten() -> str:
 # Routing
 # ---------------------------------------------------------------------------
 
+def remote_trading_allowed() -> tuple[bool, str] | bool:
+    """Whether a Telegram session may place orders. Read fresh every time.
+
+    Two conditions, and the second is not remotely changeable:
+
+      TELEGRAM_TRADING_ENABLED       the owner's decision
+      PAPER_TRADING                  the guard on that decision
+
+    Read at call time rather than at import so that flipping the config
+    and restarting the CONTROLLER is enough — this process does not have
+    to be restarted for the wall to go back up.
+
+    Fails CLOSED. If lockbot_config cannot be imported, or either flag is
+    missing, the answer is no. A missing setting must never read as
+    permission; that was the exact mistake behind daytrade_count, where
+    an absent field was treated as "zero day trades used" and therefore
+    as licence to trade.
+    """
+
+    try:
+        import lockbot_config as _config
+    except Exception:
+        return False
+
+    if not getattr(_config, "TELEGRAM_TRADING_ENABLED", False):
+        return False
+
+    if getattr(_config, "TELEGRAM_TRADING_REQUIRES_PAPER", True):
+        if not getattr(_config, "PAPER_TRADING", True):
+            return False
+
+        if getattr(_config, "LIVE_TRADING_ENABLED", False):
+            return False
+
+    return True
+
+
+def remote_trading_status() -> str:
+    """One line for the console banner and --check."""
+
+    if remote_trading_allowed():
+        return "ENABLED (paper) — orders permitted from Telegram"
+
+    try:
+        import lockbot_config as _config
+
+        if getattr(_config, "TELEGRAM_TRADING_ENABLED", False):
+            return ("disabled — TELEGRAM_TRADING_ENABLED is on but the "
+                    "account is not in paper mode")
+    except Exception:
+        return "disabled — configuration unreadable"
+
+    return "disabled (read-only, /flatten excepted)"
+
+
 def handle_message(
     text: str,
     user_id: int,
@@ -517,10 +572,23 @@ def handle_message(
     try:
         import lockbot_brain
 
-        # READ_ONLY is the money wall and stays up: every tool that can
-        # place an order refuses in a remote session, regardless of what
-        # is asked or how convincingly.
-        lockbot_brain.READ_ONLY = True
+        # READ_ONLY is the money wall, and as of 2026-08-07 the owner
+        # decides whether it stands on this channel.
+        #
+        # It used to be hardcoded True, on the reasoning that a leaked
+        # bot token must not be able to move money regardless of what is
+        # asked or how convincingly. That reasoning has not been refuted.
+        # It was OVERRULED, explicitly and twice, for a paper account —
+        # which is a different judgement, not a rebuttal. The remaining
+        # access control is the allowlist, currently one user ID.
+        #
+        # The one part that is not remotely negotiable is below: order
+        # authority here is conditional on PAPER_TRADING. A decision made
+        # about fake money must not silently become a decision about real
+        # money on the day LIVE_TRADING_ENABLED flips, so going live
+        # re-raises this wall automatically and someone has to choose
+        # again at a keyboard.
+        lockbot_brain.READ_ONLY = not remote_trading_allowed()
 
         # The confirmation handler is a DIFFERENT question, and refusing
         # everything here was wrong.
@@ -601,7 +669,7 @@ def run() -> int:
     print("=" * 60)
     print(f"Bot        : @{username}")
     print(f"Allowlist  : {sorted(allowlist) if allowlist else 'EMPTY — will refuse everyone'}")
-    print("Trading    : disabled (read-only, /flatten excepted)")
+    print(f"Trading    : {remote_trading_status()}")
     print("Stop       : Ctrl+C")
     print("=" * 60)
 
@@ -693,7 +761,7 @@ def check() -> int:
         print("including you. Start it, message it once, and it will reply")
         print("with your user ID to add to TELEGRAM_ALLOWED_USER_IDS.")
 
-    print("Trading          : disabled (read-only, /flatten excepted)")
+    print(f"Trading          : {remote_trading_status()}")
 
     return 0
 
@@ -893,14 +961,62 @@ def _self_test() -> int:
     _PENDING_FLATTEN.clear()
 
     print()
-    print("A remote session can recover the system but cannot spend money")
+    print("Remote order authority is the owner's switch, guarded by PAPER")
+
+    # The guard that is NOT remotely negotiable. TELEGRAM_TRADING_ENABLED
+    # is the owner's call; the paper condition is what stops that call
+    # silently becoming a decision about real money later.
+    import lockbot_config as _cfg
+
+    _saved = (
+        getattr(_cfg, "TELEGRAM_TRADING_ENABLED", False),
+        getattr(_cfg, "TELEGRAM_TRADING_REQUIRES_PAPER", True),
+        getattr(_cfg, "PAPER_TRADING", True),
+        getattr(_cfg, "LIVE_TRADING_ENABLED", False),
+    )
+
+    try:
+        _cfg.TELEGRAM_TRADING_REQUIRES_PAPER = True
+
+        _cfg.TELEGRAM_TRADING_ENABLED = False
+        _cfg.PAPER_TRADING = True
+        _cfg.LIVE_TRADING_ENABLED = False
+        check_that("off by default means no remote orders",
+                   not remote_trading_allowed())
+
+        _cfg.TELEGRAM_TRADING_ENABLED = True
+        check_that("the owner's switch turns it on for paper",
+                   remote_trading_allowed())
+
+        _cfg.PAPER_TRADING = False
+        check_that("but a LIVE account overrides the owner's switch",
+                   not remote_trading_allowed(),
+                   "remote trading must never survive leaving paper mode")
+
+        _cfg.PAPER_TRADING = True
+        _cfg.LIVE_TRADING_ENABLED = True
+        check_that("and LIVE_TRADING_ENABLED alone is enough to block it",
+                   not remote_trading_allowed())
+
+        _cfg.LIVE_TRADING_ENABLED = False
+        check_that("the status line stops claiming it is on",
+                   "disabled" in remote_trading_status()
+                   or "ENABLED" in remote_trading_status())
+    finally:
+        (_cfg.TELEGRAM_TRADING_ENABLED,
+         _cfg.TELEGRAM_TRADING_REQUIRES_PAPER,
+         _cfg.PAPER_TRADING,
+         _cfg.LIVE_TRADING_ENABLED) = _saved
+
+    print()
+    print("With remote trading OFF, a session still cannot spend money")
 
     import lockbot_brain as _brain
 
     _real_ro, _real_confirm = _brain.READ_ONLY, _brain.CONFIRM
 
     try:
-        # Exactly what handle_message sets before reaching the brain.
+        # What handle_message sets when remote trading is disabled.
         _brain.READ_ONLY = True
         _brain.CONFIRM = lambda *_: True
 
