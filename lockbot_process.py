@@ -344,11 +344,37 @@ def start_telegram() -> str:
     )
 
 
+# Set when somebody stops the controller on purpose; cleared when
+# somebody starts it. The watchdog reads it and declines to restart while
+# it exists, so an unattended scheduled task can never overrule a person.
+STOP_MARKER_FILE = PROJECT_FOLDER / "controller_stopped_deliberately"
+
+
+def _mark_deliberate_stop() -> None:
+    try:
+        STOP_MARKER_FILE.write_text(
+            f"stopped {datetime.now().astimezone().isoformat(timespec='seconds')}\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _clear_deliberate_stop() -> None:
+    try:
+        STOP_MARKER_FILE.unlink()
+    except OSError:
+        pass
+
+
 def start_controller(killer=None) -> str:
     """Start the controller in its own window."""
 
     if EXECUTION_DISABLED:
         return "Execution is disabled in this process."
+
+    # Starting it is consent for the watchdog to keep it alive again.
+    _clear_deliberate_stop()
 
     existing = find_processes(CONTROLLER)
 
@@ -454,6 +480,16 @@ def stop_controller(force: bool = False, killer=None) -> str:
     if not stopped:
         return "Could not stop the controller. Try an elevated shell."
 
+    # Tell the watchdog this was on purpose.
+    #
+    # The watchdog restarts a controller it finds down, which is what
+    # rescues a crash. Without this marker it would also undo a
+    # deliberate stop -- somebody halting the system for maintenance
+    # would find a scheduled task starting it again twenty minutes
+    # later, and would have no way to win that argument. Cleared by
+    # start_controller().
+    _mark_deliberate_stop()
+
     note = ""
 
     if options:
@@ -462,7 +498,9 @@ def stop_controller(force: bool = False, killer=None) -> str:
             "loss. Nothing is watching them."
         )
 
-    return f"Stopped pid(s) {', '.join(map(str, stopped))}.{note}"
+    return (f"Stopped pid(s) {', '.join(map(str, stopped))}.{note}\n"
+            "The watchdog will NOT restart it — this was recorded as a "
+            "deliberate stop. Start it normally to hand control back.")
 
 
 def restart_controller(force: bool = False, killer=None) -> str:

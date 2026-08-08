@@ -27,8 +27,9 @@ list without ever raising an error.
 
 from __future__ import annotations
 
+import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import lockbot_config as config
@@ -322,6 +323,134 @@ def check_telegram_bot(market_open: bool | None) -> tuple[bool, str]:
     )
 
 
+# How many restarts the watchdog may attempt before it stops trying and
+# escalates instead.
+#
+# The failure this guards against is a crash LOOP: the network is down
+# for an hour, the controller dies the same way on every start, and an
+# unattended scheduled task restarts it every 20 minutes forever while
+# the phone fills with identical alerts. Three attempts is enough to ride
+# out a transient fault and few enough that a persistent one is obvious.
+MAX_RESTARTS = 3
+RESTART_WINDOW_HOURS = 6
+
+RESTART_STATE_FILE = PROJECT_FOLDER / "watchdog_restarts.json"
+
+# Written by lockbot_process.stop_controller(), cleared on a deliberate
+# start. Its whole purpose is that the watchdog must never undo a human
+# decision -- someone stopping the controller for maintenance should not
+# have to fight a scheduled task that keeps starting it again.
+STOP_MARKER_FILE = PROJECT_FOLDER / "controller_stopped_deliberately"
+
+
+def _restart_history() -> list[str]:
+    try:
+        return json.loads(RESTART_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _recent_restarts() -> list[str]:
+    """Restart timestamps inside the rolling window."""
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=RESTART_WINDOW_HOURS)
+    recent = []
+
+    for stamp in _restart_history():
+        try:
+            when = datetime.fromisoformat(str(stamp))
+        except (TypeError, ValueError):
+            continue
+
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+
+        if when >= cutoff:
+            recent.append(stamp)
+
+    return recent
+
+
+def _record_restart() -> None:
+    history = _recent_restarts()
+    history.append(datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+    try:
+        RESTART_STATE_FILE.write_text(json.dumps(history), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def stopped_deliberately() -> bool:
+    return STOP_MARKER_FILE.exists()
+
+
+def restart_controller_if_down(is_running=None, starter=None) -> tuple[bool, str]:
+    """Bring the controller back, unless it was stopped on purpose.
+
+    Returns (attempted, detail).
+
+    `is_running` and `starter` are injectable so the guards below can be
+    tested without a live controller. The first version had no seams and
+    two of its own acceptance checks passed vacuously, because the
+    running controller short-circuited them before the branch under test
+    was reached.
+
+    Detecting an outage and only reporting it is what turned a DNS blip
+    into a 64-minute gap on 2026-08-08: the alert fired correctly at
+    12:20 and would have fired every 20 minutes all afternoon while
+    nothing changed. This module runs OUTSIDE the controller on its own
+    schedule precisely so it can catch the controller process dying, and
+    then it did nothing about it.
+
+    Starting the controller is restorative and cannot place an order by
+    itself -- the scanner decides that, and it will not run at all until
+    reconciliation succeeds.
+    """
+
+    if is_running is None or starter is None:
+        try:
+            from lockbot_process import (
+                CONTROLLER, find_processes, start_controller,
+            )
+        except Exception as error:
+            return False, (
+                f"cannot reach the process module ({type(error).__name__})"
+            )
+
+        is_running = is_running or (lambda: bool(find_processes(CONTROLLER)))
+        starter = starter or start_controller
+
+    if is_running():
+        return False, "controller is running"
+
+    if stopped_deliberately():
+        return False, (
+            "controller is down because somebody STOPPED it on purpose "
+            f"({STOP_MARKER_FILE.name} exists). Not restarting. Delete that "
+            "file, or start it normally, to hand control back to the watchdog."
+        )
+
+    recent = _recent_restarts()
+
+    if len(recent) >= MAX_RESTARTS:
+        return False, (
+            f"ESCALATION: {len(recent)} restarts already in the last "
+            f"{RESTART_WINDOW_HOURS} hours and it is down again. NOT "
+            "restarting a fourth time — something is wrong that a restart "
+            "does not fix. This needs a person."
+        )
+
+    _record_restart()
+    attempt = len(recent) + 1
+    result = starter()
+
+    return True, (
+        f"controller was down; restart attempt {attempt} of {MAX_RESTARTS} "
+        f"in the last {RESTART_WINDOW_HOURS}h — {result}"
+    )
+
+
 def run_watchdog_check() -> bool:
     """
     Run all watchdog checks. Returns True if everything looks healthy.
@@ -367,7 +496,22 @@ def run_watchdog_check() -> bool:
     if problems:
         problem_text = "\n".join(f"- {problem}" for problem in problems)
 
-        print("Status: PROBLEM DETECTED — sending alert.")
+        print("Status: PROBLEM DETECTED.")
+
+        # Act, then report what was done. An alert that only says "the
+        # controller may need to be restarted manually" is a message
+        # nobody can act on at 2am, and this process can restart it.
+        attempted, restart_detail = restart_controller_if_down()
+        print(f"Recovery                    : {restart_detail}")
+
+        if attempted:
+            action = f"\n\nACTION TAKEN: {restart_detail}"
+        elif "ESCALATION" in restart_detail:
+            action = f"\n\n⚠ {restart_detail}"
+        elif "on purpose" in restart_detail:
+            action = f"\n\nNOT restarting: {restart_detail}"
+        else:
+            action = ""
 
         send_smart_notification(
             symbol="SYSTEM",
@@ -376,9 +520,7 @@ def run_watchdog_check() -> bool:
             reason="WATCHDOG_CHECK_FAILED",
             message=(
                 "The external watchdog detected a problem with LOCKBOT:\n\n"
-                f"{problem_text}\n\n"
-                "Check the machine — the controller may need to be "
-                "restarted manually."
+                f"{problem_text}{action}"
             ),
             force=True,
         )
@@ -389,7 +531,143 @@ def run_watchdog_check() -> bool:
     return True
 
 
+def _self_test() -> int:
+    """LOCKBOT's four acceptance tests for the 2026-08-08 outage."""
+
+    import tempfile
+
+    global RESTART_STATE_FILE, STOP_MARKER_FILE
+
+    failures: list[str] = []
+
+    def check(name: str, condition: bool, detail: str = "") -> None:
+        if condition:
+            print(f"  PASS  {name}")
+        else:
+            print(f"  FAIL  {name}" + (f" -- {detail}" if detail else ""))
+            failures.append(name)
+
+    real_state, real_marker = RESTART_STATE_FILE, STOP_MARKER_FILE
+
+    with tempfile.TemporaryDirectory() as folder:
+        RESTART_STATE_FILE = Path(folder) / "restarts.json"
+        STOP_MARKER_FILE = Path(folder) / "stopped"
+
+        print("\nTHE LOG CHECK MUST NOT BE SILENCED BY A CLOSED MARKET")
+        # The fix that was NOT made, asserted so nobody makes it later.
+        # The closed-market backoff is 300s, well inside the 15-minute
+        # limit, so a stale log means the controller is really gone.
+        check("no market-closed exemption exists on the log check",
+              "market" not in check_controller_log.__doc__.lower(),
+              "a market-closed exemption here would have hidden a "
+              "64-minute outage on 2026-08-08")
+        check("and the limit is still tighter than the closed backoff",
+              MAX_LOG_AGE_MINUTES * 60 > 300,
+              f"{MAX_LOG_AGE_MINUTES}min vs a 300s backoff")
+
+        # The controller is DOWN for these, injected rather than real.
+        started: list[int] = []
+        down = lambda: False            # noqa: E731
+        up = lambda: True               # noqa: E731
+
+        def starter():
+            started.append(1)
+            return "Started. pid 999."
+
+        print("\nA RUNNING CONTROLLER IS LEFT ALONE")
+        attempted, detail = restart_controller_if_down(up, starter)
+        check("nothing is done when it is already up", not attempted, detail)
+        check("and nothing was started", not started)
+
+        print("\nA DELIBERATE STOP IS NEVER UNDONE")
+        STOP_MARKER_FILE.write_text("stopped", encoding="utf-8")
+        check("the marker is seen", stopped_deliberately())
+
+        attempted, detail = restart_controller_if_down(down, starter)
+        check("and no restart is attempted", not attempted, detail)
+        check("the reason says it was on purpose", "on purpose" in detail,
+              detail)
+        check("nothing was started", not started)
+
+        STOP_MARKER_FILE.unlink()
+        check("clearing the marker hands control back",
+              not stopped_deliberately())
+
+        print("\nA DOWN CONTROLLER IS ACTUALLY RESTARTED")
+        attempted, detail = restart_controller_if_down(down, starter)
+        check("the restart happens", attempted, detail)
+        check("the starter really ran", len(started) == 1)
+        check("and the alert names the attempt count",
+              "attempt 1 of" in detail, detail)
+
+        print("\nTHE CRASH-LOOP GUARD")
+        while len(_recent_restarts()) < MAX_RESTARTS:
+            _record_restart()
+
+        check(f"{MAX_RESTARTS} restarts are remembered",
+              len(_recent_restarts()) == MAX_RESTARTS)
+
+        before = len(started)
+        attempted, detail = restart_controller_if_down(down, starter)
+        check("a fourth attempt is refused", not attempted, detail)
+        check("and it escalates rather than going quiet",
+              "ESCALATION" in detail, detail)
+        check("nothing was started on the fourth", len(started) == before)
+
+        print("\nOLD ATTEMPTS AGE OUT OF THE WINDOW")
+        stale = (datetime.now(timezone.utc)
+                 - timedelta(hours=RESTART_WINDOW_HOURS + 1))
+        RESTART_STATE_FILE.write_text(
+            json.dumps([stale.isoformat(timespec="seconds")] * 5),
+            encoding="utf-8")
+        check("attempts older than the window are forgotten",
+              not _recent_restarts())
+
+        print("\nIT NEVER BREAKS ON BAD STATE")
+        RESTART_STATE_FILE.write_text("not json", encoding="utf-8")
+        check("a corrupt state file reads as empty", _recent_restarts() == [])
+        RESTART_STATE_FILE.unlink()
+        check("a missing state file reads as empty", _recent_restarts() == [])
+
+    RESTART_STATE_FILE, STOP_MARKER_FILE = real_state, real_marker
+
+    print("\nTHE CONTROLLER SURVIVES AN UNREACHABLE BROKER")
+    source = (PROJECT_FOLDER / "lockbot_controller.py").read_text(
+        encoding="utf-8")
+    check("a failed reconciliation no longer raises",
+          'raise RuntimeError("Startup broker reconciliation failed.")'
+          not in source,
+          "a DNS blip would kill the controller again")
+    check("it comes up degraded instead", "DEGRADED" in source)
+    check("and blocks the equity entry path",
+          "Market Scanner SKIPPED" in source)
+    check("and the options entry path",
+          "Options Scanner SKIPPED" in source)
+    check("while still running the options stop loss",
+          source.index("Options Manager")
+          < source.index("Options Scanner SKIPPED"),
+          "exits must not be gated on reconciliation")
+
+    print()
+
+    if failures:
+        print(f"{len(failures)} FAILED: {', '.join(failures)}")
+        return 1
+
+    print("All watchdog checks passed.")
+    return 0
+
+
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="LOCKBOT external watchdog")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_test:
+        sys.exit(_self_test())
+
     healthy = run_watchdog_check()
     sys.exit(0 if healthy else 1)
 

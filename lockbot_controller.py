@@ -453,12 +453,50 @@ def run_controller() -> None:
     write_log("Controller started.")
     write_log("Starting broker reconciliation.")
 
-    reconciliation_ok = run_startup_reconciliation()
+    # A FAILED RECONCILIATION NO LONGER KILLS THE CONTROLLER.
+    #
+    # It used to raise, and on 2026-08-08 that turned a momentary DNS
+    # blip into a 64-minute outage: the scheduled task started the
+    # controller at 11:16:57, getaddrinfo failed for
+    # paper-api.alpaca.markets, and the supervisor died on the spot with
+    # nothing to restart it. DNS was fine seconds later.
+    #
+    # The whole design of this file is "the controller stays up
+    # regardless" -- three attempts per component, then self_repair,
+    # then an alert, and it keeps cycling. That resilience lived inside
+    # the cycle loop while startup sat outside it, so the one step that
+    # runs before the loop was the one step that could not survive a
+    # network hiccup.
+    #
+    # So it now comes up DEGRADED instead. Reconciliation is retried on
+    # later cycles, and until it succeeds new entries are blocked -- see
+    # `reconciled` in the loop below. Starting without reconciling is not
+    # free: it exists to catch positions that drifted while the
+    # controller was down, so trading before it succeeds could act on a
+    # book we have not verified. Blocking entries while still running
+    # exits is the compromise LOCKBOT specified.
+    reconciled = run_startup_reconciliation()
 
-    if not reconciliation_ok:
-        raise RuntimeError("Startup broker reconciliation failed.")
+    if reconciled:
+        write_log("Broker reconciliation completed successfully.")
+    else:
+        write_log(
+            "DEGRADED: startup broker reconciliation FAILED. The controller "
+            "is up and will keep running exits, but NEW ENTRIES ARE BLOCKED "
+            "until reconciliation succeeds on a later cycle."
+        )
 
-    write_log("Broker reconciliation completed successfully.")
+        send_controller_notification(
+            title="LOCKBOT Started DEGRADED",
+            message=(
+                "Broker reconciliation failed at startup, usually a network "
+                "blip.\n\n"
+                "The controller is RUNNING. Exits and stops still run.\n"
+                "New entries are BLOCKED until reconciliation succeeds.\n\n"
+                "It retries every cycle. No action needed unless this "
+                "persists."
+            ),
+        )
 
     send_controller_notification(
         title="LOCKBOT Controller Online",
@@ -497,6 +535,28 @@ def run_controller() -> None:
                 time.sleep(backoff_seconds)
                 continue
 
+            # Retry a reconciliation that failed at startup. Until it
+            # succeeds the book has not been verified against the broker,
+            # so entries stay blocked while exits keep running.
+            if not reconciled:
+                reconciled = run_startup_reconciliation()
+
+                if reconciled:
+                    write_log(
+                        "Broker reconciliation succeeded on retry. Entries "
+                        "are no longer blocked."
+                    )
+                    send_controller_notification(
+                        title="LOCKBOT Reconciled",
+                        message=("Broker reconciliation succeeded. Normal "
+                                 "operation resumed; entries unblocked."),
+                    )
+                else:
+                    write_log(
+                        "Still DEGRADED: reconciliation failed again. "
+                        "Entries remain blocked; exits continue."
+                    )
+
             # Equities run exits BEFORE entries too, for the same reason
             # the options pair does below: a position already held has a
             # stronger claim on the cycle than one not yet opened.
@@ -514,11 +574,24 @@ def run_controller() -> None:
                     component_name="Equity Time Stop",
                 )
 
-            scanner_ok = run_component_with_recovery(
-                script_path=SCANNER_FILE,
-                component_name="Market Scanner",
-                health_check=display_scanner_state,
-            )
+            # The two ENTRY paths, gated on reconciliation. Everything
+            # above and below this block is an exit, a stop or a report,
+            # and those run regardless -- a book we cannot verify is a
+            # reason not to add to it, never a reason to stop protecting
+            # what is already open.
+            scanner_ok = True
+
+            if reconciled:
+                scanner_ok = run_component_with_recovery(
+                    script_path=SCANNER_FILE,
+                    component_name="Market Scanner",
+                    health_check=display_scanner_state,
+                )
+            else:
+                write_log(
+                    "Market Scanner SKIPPED — unreconciled book, entries "
+                    "blocked."
+                )
 
             manager_ok = run_component_with_recovery(
                 script_path=TRADE_MANAGER_FILE,
@@ -543,10 +616,19 @@ def run_controller() -> None:
                     component_name="Options Manager",
                 )
 
-                options_scanner_ok = run_component_with_recovery(
-                    script_path=OPTIONS_SCANNER_FILE,
-                    component_name="Options Scanner",
-                )
+                # The other entry path. Options Manager above is the
+                # only stop loss a contract has and runs regardless;
+                # this one commits new premium and does not.
+                if reconciled:
+                    options_scanner_ok = run_component_with_recovery(
+                        script_path=OPTIONS_SCANNER_FILE,
+                        component_name="Options Scanner",
+                    )
+                else:
+                    write_log(
+                        "Options Scanner SKIPPED — unreconciled book, "
+                        "entries blocked."
+                    )
 
             health_ok = run_component_with_recovery(
                 script_path=HEALTH_MONITOR_FILE,
