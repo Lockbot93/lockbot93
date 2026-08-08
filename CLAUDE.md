@@ -551,18 +551,35 @@ in-sample number substitute for it.
 
 Read this before building anything intended to improve returns.
 
-As of 2026-07-29, `shadow_trades.py` resolved 55 of 157 logged setups:
+As of 2026-08-07, `shadow_trades.py` has resolved 162 of 361 logged setups:
 
-- **15 hit target, 40 hit stop — a 27.8% win rate, average −0.17R.**
+- **27 hit target, 135 hit stop — a 16.7% win rate.**
 - The brackets run at 2:1 reward:risk, so **breakeven needs 33.3%**. The
-  measured edge is negative, not merely unproven.
-- **Volume ratio, the tiebreaker used to rank which setups get taken, is
-  inverted.** Higher-volume half: 21.4% win rate, −0.36R. Lower-volume half:
-  33.3%, 0.00R. LOCKBOT's ranking is currently selecting the worse setups.
+  measured edge is negative, not merely unproven, and it has got WORSE as
+  the sample grew: 27.8% at n=55, 16.7% at n=162.
+- **Weak uptrends beat strong ones** — 21% of 87 against 12% of 75, two-tail
+  p≈0.14. The only split that has persisted. Not significant, and both
+  numbers lose money, so it is something to keep watching rather than to
+  act on.
 
-Caveats that matter: the sample is small and narrow (mostly 7/28–7/29, one
-regime), fills are simulated at exact stop/target, and ambiguous bars count
-as losses. It is directional evidence, not a verdict.
+**The volume-ratio inversion is dead. Do not re-propose it.** This section
+used to report it as a finding: at n=55 the lower-volume half won 33.3%
+against the higher half's 21.4%, and the conclusion drawn was that LOCKBOT's
+tiebreaker was selecting the worse setups. It failed replication twice —
+n=107 on 2026-08-03 and n=162 on 2026-08-07, where the median split now
+reads lower 14.8% against higher 18.5%. **Logged at weight zero.**
+
+Two things about how that entry survived, both worth more than the finding
+itself. It sat here uncorrected for four days after it had already failed at
+n=107, because the doc was not updated when the replication ran — a stale
+finding is worse than no finding, since it gets read as settled. And the
+right way to record its death is "failed replication twice", not "the
+direction flipped": the second phrasing invites the next reader to chase the
+reversal, which is the same mistake in a mirror.
+
+Caveats that still matter: fills are simulated at exact stop and target with
+**no spread and no slippage charged**, so every number here is optimistic by
+an amount nobody has measured, and ambiguous bars count as losses.
 
 The implication for options is direct: options pay the spread on entry *and*
 exit and lose value to theta daily, so a setup that loses money in shares
