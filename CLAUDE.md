@@ -640,6 +640,56 @@ Do not build entry-side features on the current signal. Cost and hazard
 controls (spread, IV, theta, event risk) are still worth having, because
 they reduce what a bad trade costs and do not depend on the signal working.
 
+## CALENDAR TIMING: RUN, FAILED, FAMILY CLOSED (2026-08-07)
+
+The registration below was written first and the result is recorded
+against it. 77 symbols, 1,003 sessions, 2022-08-08 to 2026-08-06, 72,573
+seeded random entries per horizon, costs charged, timeouts marked to
+market, every statistic day-clustered.
+
+    OVERNIGHT (3-day hold, 2% stop)      SWING (5-day hold, 5% stop)
+    cell             edge   pct     t    cell             edge   pct     t
+    Monday         +0.010    62 +0.22    Monday         -0.012    36 -0.35
+    Tuesday        -0.042    12 -1.00    Tuesday        -0.014    31 -0.42
+    Wednesday      -0.020    32 -0.47    Wednesday      +0.002    52 +0.04
+    Thursday       +0.036    84 +0.84    Thursday       +0.012    66 +0.35
+    Friday         +0.018    69 +0.43    Friday         +0.013    67 +0.38
+    turn_of_month  +0.012    66 +0.33    turn_of_month  +0.023    82 +0.78
+    expiry_week    -0.061     4 -1.58    expiry_week    -0.054     3 -1.71
+
+    14 cells tested. 0 cleared every clause. 0 cleared Bonferroni t>=2.99.
+
+The best cell in the whole table is Thursday overnight at +0.036R and the
+84th percentile — **a third of the required edge**, and short of the
+percentile clause too. No cell came close.
+
+**Per the registration this closes the calendar family on equities at both
+horizons, permanently, with no re-cut path.** Do not re-propose day-of-week,
+turn-of-month or expiry-week timing. Do not propose conjunctions of them:
+the registration forbade conjunctions in advance precisely so that
+"Tuesdays in expiry week" could not be reached for afterwards.
+
+**The tempting observation, recorded and NOT acted on.** Expiry week is the
+strongest cell in the table and it is NEGATIVE at both horizons — −0.061R
+at the 4th percentile and −0.054R at the 3rd, the only two cells anywhere
+near an extreme. The inverse suggests itself immediately: avoid expiry
+week, or short it.
+
+That is exactly the post-hoc fishing the registration exists to block, and
+it is the same shape as the news result, where the edge was consistently
+negative and the inverse was deliberately left untested. If it is ever
+tested it needs its own registration and its own held-out years decided
+BEFORE anyone looks at a number. The fact that a negative result is
+"interesting" is not a licence to mine it.
+
+**What this cost and what it bought.** It was cheap — no new data, no
+subscription, a few minutes of compute — and it was the second idea ever
+to clear condition (a) of THE BAR, since a date is not a price. Both
+qualifying ideas have now failed. That is worth more than it sounds: the
+constraint is not that LOCKBOT lacks clever price transformations, it is
+that the two non-price inputs available on this subscription carry nothing
+either.
+
 ## PRE-REGISTRATION: calendar timing. One attempt, ever. (2026-08-07)
 
 Written by LOCKBOT before any result existed, at the owner's request for
