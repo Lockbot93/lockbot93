@@ -126,15 +126,24 @@ ENABLE_PAPER_EXITS = False
 # `python lockbot_config.py` rather than buried in a handler.
 TELEGRAM_TRADING_ENABLED = True
 
-# The part that is NOT the owner's to turn off from a phone.
+# The part that is NOT the owner's to turn off, and no longer a switch.
 #
 # Remote order authority is permitted ONLY while PAPER_TRADING is True.
 # The decision above was made about fake money; it must not silently
 # become a decision about real money the day LIVE_TRADING_ENABLED flips.
-# Anyone going live has to come back here and choose again, deliberately,
-# at a keyboard — which is the same standard PAPER_TRADING itself is
-# held to.
-TELEGRAM_TRADING_REQUIRES_PAPER = True
+#
+# This WAS a flag, and LOCKBOT filed the hole in it (agent_channel
+# b16e2f2a) rather than vetoing: the guard's own off-switch sat in the
+# very file somebody edits on the day they go live, so "going live
+# re-raises the wall automatically" was true only if a second flag had
+# never been touched — precisely the silent persistence the guard exists
+# to prevent.
+#
+# The check is unconditional in lockbot_telegram.remote_trading_allowed()
+# and this setting is no longer read. It is kept only so that anyone who
+# set it True and expected it to matter finds this note instead of a
+# silent no-op.
+TELEGRAM_TRADING_REQUIRES_PAPER = True  # not consulted; see the note above
 
 
 # ------------------------------------------------------------

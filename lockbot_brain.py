@@ -1440,6 +1440,7 @@ def build_tools() -> list:
     @beta_tool
     def sweep_exit_ratios(
         name: str,
+        rationale: str,
         conditions_json: str,
         trend: str = "ANY",
         side: str = "BUY_LONG",
@@ -1465,8 +1466,16 @@ def build_tools() -> list:
         Four ratios only. At four tests one false pass at p<0.05 is
         already about 18% likely.
 
-        Places no orders. Same arguments as propose_strategy, minus the
-        rationale.
+        Places no orders. Same arguments as propose_strategy.
+
+        The rationale is REQUIRED, and the first version of this tool
+        omitted it on the theory that a sweep is a measurement rather
+        than a proposal. That was wrong twice over: validate_spec refuses
+        a spec without one, so every call returned REJECTED and no sweep
+        could ever run -- and the reason it refuses ("a rule nobody can
+        state a reason for is a curve fit waiting to happen") applies
+        with more force to a sweep, not less, because sweeping four
+        ratios is four chances to find a number you like.
         """
 
         import json as _json
@@ -1480,6 +1489,7 @@ def build_tools() -> list:
 
         spec = {
             "name": name,
+            "rationale": rationale,
             "trend": trend,
             "side": side,
             "conditions": conditions,

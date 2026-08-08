@@ -468,40 +468,54 @@ def remote_trading_allowed() -> tuple[bool, str] | bool:
     as licence to trade.
     """
 
+    return _remote_trading_state()[0]
+
+
+def _remote_trading_state() -> tuple[bool, str]:
+    """(allowed, why). The reason is separated so a refusal can say which.
+
+    Raised by LOCKBOT as agent_channel b16e2f2a: failing closed is right,
+    failing SILENT is not. A user told only "no" cannot tell the owner's
+    switch being off from a config that will not parse, and those need
+    opposite responses -- one is a decision, the other is an outage.
+    That is the daytrade_count lesson read in the other direction.
+    """
+
     try:
         import lockbot_config as _config
-    except Exception:
-        return False
+    except Exception as error:
+        return False, f"configuration unreadable ({type(error).__name__})"
+
+    # The paper condition is NOT conditional on a flag.
+    #
+    # It was, and LOCKBOT filed that as the soft spot in the same item:
+    # the guard's own off-switch sat as an ordinary setting in the very
+    # file somebody edits on the day they go live, so "going live
+    # re-raises the wall automatically" was true only if a second flag
+    # had never been touched. That is precisely the silent persistence
+    # the guard exists to prevent, so the check is unconditional now and
+    # TELEGRAM_TRADING_REQUIRES_PAPER is no longer consulted.
+    if not getattr(_config, "PAPER_TRADING", True):
+        return False, "the account is not in paper mode"
+
+    if getattr(_config, "LIVE_TRADING_ENABLED", False):
+        return False, "live trading is enabled"
 
     if not getattr(_config, "TELEGRAM_TRADING_ENABLED", False):
-        return False
+        return False, "the owner's switch (TELEGRAM_TRADING_ENABLED) is off"
 
-    if getattr(_config, "TELEGRAM_TRADING_REQUIRES_PAPER", True):
-        if not getattr(_config, "PAPER_TRADING", True):
-            return False
-
-        if getattr(_config, "LIVE_TRADING_ENABLED", False):
-            return False
-
-    return True
+    return True, "enabled for paper trading"
 
 
 def remote_trading_status() -> str:
     """One line for the console banner and --check."""
 
-    if remote_trading_allowed():
+    allowed, why = _remote_trading_state()
+
+    if allowed:
         return "ENABLED (paper) — orders permitted from Telegram"
 
-    try:
-        import lockbot_config as _config
-
-        if getattr(_config, "TELEGRAM_TRADING_ENABLED", False):
-            return ("disabled — TELEGRAM_TRADING_ENABLED is on but the "
-                    "account is not in paper mode")
-    except Exception:
-        return "disabled — configuration unreadable"
-
-    return "disabled (read-only, /flatten excepted)"
+    return f"disabled — {why} (/flatten excepted)"
 
 
 def handle_message(
@@ -998,7 +1012,34 @@ def _self_test() -> int:
         check_that("and LIVE_TRADING_ENABLED alone is enough to block it",
                    not remote_trading_allowed())
 
+        # b16e2f2a. The guard's own off-switch used to defeat the guard:
+        # REQUIRES_PAPER was an ordinary flag in the same file somebody
+        # edits on the day they go live, so "going live re-raises the
+        # wall" held only if a second flag had never been touched.
+        _cfg.TELEGRAM_TRADING_REQUIRES_PAPER = False
+        _cfg.LIVE_TRADING_ENABLED = True
+        _cfg.PAPER_TRADING = False
+        check_that("the paper guard cannot be switched off by a flag",
+                   not remote_trading_allowed(),
+                   "REQUIRES_PAPER=False must not re-open a live account")
+
+        _cfg.TELEGRAM_TRADING_REQUIRES_PAPER = True
         _cfg.LIVE_TRADING_ENABLED = False
+        _cfg.PAPER_TRADING = True
+
+        # A refusal must say WHICH refusal it is. Fail closed, not silent.
+        _cfg.TELEGRAM_TRADING_ENABLED = False
+        check_that("an owner-off refusal names the owner's switch",
+                   "TELEGRAM_TRADING_ENABLED" in _remote_trading_state()[1])
+
+        _cfg.TELEGRAM_TRADING_ENABLED = True
+        _cfg.PAPER_TRADING = False
+        check_that("a live-account refusal says so instead",
+                   "paper" in _remote_trading_state()[1]
+                   and "TELEGRAM_TRADING_ENABLED"
+                   not in _remote_trading_state()[1])
+
+        _cfg.PAPER_TRADING = True
         check_that("the status line stops claiming it is on",
                    "disabled" in remote_trading_status()
                    or "ENABLED" in remote_trading_status())
