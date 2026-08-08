@@ -617,6 +617,36 @@ SHADOW_LOG_BLOCKED_SHORTS = True
 
 LAB_UNIVERSE_FILE = PROJECT_FOLDER / "lab_universe.csv"
 
+# What a backtest charges per side, as a fraction of price.
+#
+# First item on LOCKBOT's agenda 2026-08-07: the lab filled at the exact
+# stop or target and charged nothing, so every number this project has
+# produced is optimistic by an amount nobody had measured.
+#
+# This one IS measured rather than assumed, which matters because the
+# obvious source is unusable: the live feed is iex, and a resting iex
+# quote on AAPL has read 293.64 / 324.64. A cost model built on those
+# quotes would be wilder than the thing it models.
+#
+# So trading_costs.corwin_schultz estimates the spread from high-low
+# ranges, which needs only OHLC. Measured 2026-08-07 across 40 lab
+# symbols on 30 days of 5-minute bars:
+#
+#     median round-trip spread   0.058%   -> 0.029% per side
+#     mean                       0.063%
+#     range                      0.027% - 0.132%
+#
+# Set to 0.05% per side: the measured 0.029% spread, plus roughly 0.02%
+# for slippage. Slippage is an ALLOWANCE, not a measurement -- a stop
+# order becomes a market order and fills at the next available price,
+# which in a fast move is past the stop, and nothing in this data can
+# tell us how far. It is the honest half of this number to argue about.
+#
+# The unit that bites is R, not percent. See trading_costs.round_trip_r:
+# at a 2% stop this is 0.050R a round trip, at a 0.5% stop it is 0.200R.
+# Any sweep that varies the stop is silently varying the cost in R.
+BACKTEST_COST_PER_SIDE_PERCENT = 0.0005
+
 # Daily ATR band for the lab, as fractions. A rule needing a 10% move in
 # a week is plausible at 3%/day and impossible at 1.5%.
 LAB_MIN_ATR_PERCENT = 0.030

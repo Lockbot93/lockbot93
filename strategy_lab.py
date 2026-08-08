@@ -629,6 +629,17 @@ def sweep_reward_ratios(
                 "expectancy_all_r": (
                     sum(t.r_multiple for t in entries) / len(entries)
                     if entries else 0.0),
+                # The same figure with the round trip charged. This is
+                # the one to read: first item on LOCKBOT's agenda was
+                # that the lab charged nothing, and a sweep is exactly
+                # where it bites, because varying the stop varies the
+                # cost in R without saying so.
+                "net_expectancy_all_r": (
+                    sum(t.net_r() for t in entries) / len(entries)
+                    if entries else 0.0),
+                "cost_r": (
+                    sum(t.cost_r for t in entries) / len(entries)
+                    if entries else 0.0),
             }
 
         rule_score = scored.get("rule", {})
@@ -647,6 +658,17 @@ def sweep_reward_ratios(
             "edge_expectancy": round(
                 rule_score.get("expectancy_all_r", 0.0)
                 - control_score.get("expectancy_all_r", 0.0), 4),
+            # The edge is cost-INVARIANT when rule and control trade at
+            # the same stop, because both pay the same round trip and it
+            # cancels. That is worth stating rather than leaving to be
+            # rediscovered: charging costs does not move the edge column,
+            # it moves whether either arm makes money at all. A rule can
+            # beat its control and still lose, which is precisely the
+            # trap the crypto work hit.
+            "net_edge_expectancy": round(
+                rule_score.get("net_expectancy_all_r", 0.0)
+                - control_score.get("net_expectancy_all_r", 0.0), 4),
+            "cost_r": round(rule_score.get("cost_r", 0.0), 4),
         })
 
     return rows
@@ -661,8 +683,9 @@ def describe_sweep(rows: list[dict]) -> str:
     lines = [
         f"  {'ratio':>6} {'target':>7} {'b/e':>6} "
         f"{'rule win':>9} {'ctrl win':>9} {'edge':>7} "
-        f"{'rule R':>8} {'ctrl R':>8} {'edge R':>8} {'timeout':>8}",
-        "  " + "-" * 88,
+        f"{'rule net':>9} {'ctrl net':>9} {'edge R':>8} "
+        f"{'cost':>7} {'timeout':>8}",
+        "  " + "-" * 100,
     ]
 
     for row in rows:
@@ -673,9 +696,10 @@ def describe_sweep(rows: list[dict]) -> str:
             f"{rule.get('win_rate', 0):>8.1%} "
             f"{control.get('win_rate', 0):>8.1%} "
             f"{row['edge_win_rate']:>+6.1%} "
-            f"{rule.get('expectancy_all_r', 0):>+8.3f} "
-            f"{control.get('expectancy_all_r', 0):>+8.3f} "
+            f"{rule.get('net_expectancy_all_r', 0):>+9.3f} "
+            f"{control.get('net_expectancy_all_r', 0):>+9.3f} "
             f"{row['edge_expectancy']:>+8.3f} "
+            f"{row.get('cost_r', 0):>7.3f} "
             f"{rule.get('timeout_share', 0):>7.0%}"
         )
 
@@ -689,6 +713,32 @@ def describe_sweep(rows: list[dict]) -> str:
         "  'edge' columns are rule MINUS control on identical bars. "
         "Breakeven is\n  shown only for reference -- a random walk scores it "
         "at every ratio.")
+
+    # Two different questions, and conflating them is how the crypto work
+    # nearly went wrong: a rule cleared its control by +0.10R while the
+    # control itself was NEGATIVE after costs, so the rule beat the coin
+    # and still lost money.
+    net_best = max(rows, key=lambda r: r["rule"].get(
+        "net_expectancy_all_r", 0.0))
+    net_value = net_best["rule"].get("net_expectancy_all_r", 0.0)
+
+    lines.append("")
+    lines.append(
+        f"  Best ratio by NET return: {net_best['reward_ratio']:.2f} "
+        f"({net_value:+.3f}R after costs)")
+
+    if net_value <= 0:
+        lines.append(
+            "  NOTE: no ratio makes money after costs. Beating the control "
+            "and\n  making money are different questions, and this answers "
+            "the second\n  with a no.")
+
+    lines.append(
+        f"  Costs charged: {rows[0].get('cost_r', 0):.3f}R per round trip "
+        f"at a {rows[0].get('stop_percent', 0):.1%} stop.\n"
+        "  The edge column is cost-invariant -- both arms pay it -- so "
+        "charging\n  costs changes whether anything is PROFITABLE, not "
+        "which arm wins.")
 
     return "\n".join(lines)
 

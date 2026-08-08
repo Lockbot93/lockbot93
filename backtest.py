@@ -80,6 +80,17 @@ class Trade:
     r_multiple: float = 0.0
     bars_held: int = 0
 
+    # What the round trip cost, in R. Carried per trade rather than
+    # subtracted in place so the gross number stays inspectable -- the
+    # difference between the two IS the finding, and collapsing them
+    # would hide how much of any result is the cost assumption.
+    cost_r: float = 0.0
+
+    def net_r(self) -> float:
+        """R after costs. This is the number that would have been made."""
+
+        return self.r_multiple - self.cost_r
+
 
 @dataclass
 class Result:
@@ -104,10 +115,39 @@ class Result:
         return self.wins() / len(decided) if decided else 0.0
 
     def expectancy(self) -> float:
+        """GROSS expectancy over decided trades. Costs not charged.
+
+        Kept because every historical number in CLAUDE.md was computed
+        this way and changing its meaning would silently rewrite the
+        record. For anything new, read net_expectancy().
+        """
+
         decided = self.decided()
         if not decided:
             return 0.0
         return sum(t.r_multiple for t in decided) / len(decided)
+
+    def net_expectancy(self) -> float:
+        """Expectancy after costs, over decided trades."""
+
+        decided = self.decided()
+        if not decided:
+            return 0.0
+        return sum(t.net_r() for t in decided) / len(decided)
+
+    def cost_drag(self) -> float:
+        """Average cost charged per decided trade, in R.
+
+        Worth reporting on its own. A result that flips sign when this is
+        subtracted is a result about the cost assumption, not about the
+        rule -- and the trailing-stop lift cleared its bar by 0.002R,
+        which is inside this number.
+        """
+
+        decided = self.decided()
+        if not decided:
+            return 0.0
+        return sum(t.cost_r for t in decided) / len(decided)
 
     def days(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -202,6 +242,7 @@ def simulate_symbol(
     reward_ratio: float,
     max_bars_held: int,
     one_position_at_a_time: bool = True,
+    cost_per_side: float | None = None,
 ) -> list[Trade]:
     """Walk one symbol's bars, opening and resolving positions by `rule`.
 
@@ -356,6 +397,17 @@ def simulate_symbol(
 
     if open_trade is not None:
         trades.append(open_trade)
+
+    # Charge the round trip on every trade, including timeouts -- a
+    # position that timed out was still opened and still closed, so it
+    # paid the spread twice like any other. Stamped here rather than at
+    # each exit branch so no path can be added later that forgets it.
+    import trading_costs
+
+    cost = trading_costs.round_trip_r(stop_percent, cost_per_side)
+
+    for trade in trades:
+        trade.cost_r = cost
 
     return trades
 
@@ -751,8 +803,14 @@ def run_rules(
     stop_percent: float,
     reward_ratio: float,
     max_bars_held: int,
+    cost_per_side: float | None = None,
 ) -> list[Result]:
-    """Run every rule over every symbol's history."""
+    """Run every rule over every symbol's history.
+
+    `cost_per_side` defaults to BACKTEST_COST_PER_SIDE_PERCENT. Pass 0.0
+    to reproduce a pre-2026-08-07 number exactly; every result before
+    that date was computed with no cost charged at all.
+    """
 
     results = []
 
@@ -768,6 +826,7 @@ def run_rules(
                 stop_percent=stop_percent,
                 reward_ratio=reward_ratio,
                 max_bars_held=max_bars_held,
+                cost_per_side=cost_per_side,
             ))
 
         results.append(result)
