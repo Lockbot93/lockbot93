@@ -110,6 +110,24 @@ COLUMNS = [
     "q_conviction",
     "q_restraint",
     "q_volume_ratio",
+    # Trade ANATOMY, added 2026-08-08 for agent_channel 39a7685e — the
+    # owner's directive to study how swing trades actually move rather
+    # than only whether a rule wins.
+    #
+    # resolve_from_bars already walked the price path to decide STOP or
+    # TARGET and threw all of it away, so every setup ever logged has had
+    # its full story available and recorded only the ending.
+    #
+    # post_stop_recovered is the one that matters. For a losing trade it
+    # asks whether price later reached the original target anyway. If most
+    # of the 135 stops recovered, the entries were fine and the stops were
+    # too tight, which is fixable. If they did not, the entries were
+    # simply wrong. Nothing in this project can currently tell those two
+    # apart, and they call for opposite responses.
+    "mae_r",               # worst excursion against, in R (<= 0)
+    "mfe_r",               # best excursion for, in R (>= 0)
+    "bars_to_mfe_peak",
+    "post_stop_recovered",
 ]
 
 OUTCOME_PENDING = "PENDING"
@@ -195,6 +213,13 @@ class Resolution:
     bars_checked: int
     r_multiple: Optional[float]
 
+    # The anatomy. None when no entry price was supplied, so every
+    # existing caller and self-test behaves exactly as before.
+    mae_r: Optional[float] = None
+    mfe_r: Optional[float] = None
+    bars_to_mfe_peak: Optional[int] = None
+    post_stop_recovered: Optional[bool] = None
+
 
 def resolve_from_bars(
     bars: Iterable,
@@ -202,16 +227,45 @@ def resolve_from_bars(
     stop_price: float,
     target_price: float,
     start_time: datetime,
+    entry_price: Optional[float] = None,
 ) -> Resolution:
     """
     Walk forward through bars and find which level was touched first.
 
     A bar that spans both levels is AMBIGUOUS — 5-minute data can't say which
     came first, so it's counted as a loss rather than guessed in our favour.
+
+    WHY THIS NO LONGER RETURNS AT THE FIRST TOUCH
+
+    It used to, and that discarded the entire question the owner asked on
+    2026-08-08: how do these trades actually move? The outcome is decided
+    at the first touch and NOTHING after it was ever seen — including,
+    for a losing trade, whether price went on to reach the target anyway.
+
+    So the walk now continues to the end of the window. The outcome is
+    still fixed at the first touch, so no verdict changes and every
+    existing self-test holds; what changes is that the path is measured
+    rather than thrown away.
+
+    Pass `entry_price` to get the anatomy. Without it the extra fields
+    stay None and the behaviour is identical to before.
     """
 
     is_long = str(side).upper() in {"LONG", "BUY_LONG", "BUY"}
     checked = 0
+
+    risk = None
+
+    if entry_price:
+        risk = abs(float(entry_price) - float(stop_price)) or None
+
+    outcome: Optional[str] = None
+    outcome_r: Optional[float] = None
+    bars_at_outcome = 0
+
+    best = worst = None
+    bars_to_peak = 0
+    recovered = None
 
     for bar in bars:
         bar_time = getattr(bar, "timestamp", None)
@@ -227,6 +281,18 @@ def resolve_from_bars(
 
         checked += 1
 
+        # ---- excursions, measured on every bar in the window
+        if risk:
+            favourable = (high - entry_price) if is_long else (entry_price - low)
+            adverse = (low - entry_price) if is_long else (entry_price - high)
+
+            if best is None or favourable > best:
+                best = favourable
+                bars_to_peak = checked
+
+            if worst is None or adverse < worst:
+                worst = adverse
+
         if is_long:
             hit_target = high >= target_price
             hit_stop = low <= stop_price
@@ -234,19 +300,41 @@ def resolve_from_bars(
             hit_target = low <= target_price
             hit_stop = high >= stop_price
 
-        if hit_target and hit_stop:
-            return Resolution(OUTCOME_AMBIGUOUS, checked, -1.0)
+        # ---- the outcome is still whatever was touched FIRST
+        if outcome is None:
+            if hit_target and hit_stop:
+                outcome, outcome_r = OUTCOME_AMBIGUOUS, -1.0
+            elif hit_target:
+                outcome, outcome_r = OUTCOME_TARGET, 2.0
+            elif hit_stop:
+                outcome, outcome_r = OUTCOME_STOP, -1.0
 
-        if hit_target:
-            return Resolution(OUTCOME_TARGET, checked, 2.0)
+            if outcome is not None:
+                bars_at_outcome = checked
 
-        if hit_stop:
-            return Resolution(OUTCOME_STOP, checked, -1.0)
+                # The noise-vs-trend flag starts False and is set below if
+                # the target is reached later in the window.
+                if outcome in (OUTCOME_STOP, OUTCOME_AMBIGUOUS):
+                    recovered = False
+
+        # ---- did a stopped-out trade go on to reach its target anyway?
+        elif recovered is False and hit_target:
+            recovered = True
 
     if checked == 0:
         return Resolution(OUTCOME_NO_DATA, 0, None)
 
-    return Resolution(OUTCOME_UNRESOLVED, checked, None)
+    anatomy = {
+        "mae_r": round(worst / risk, 4) if risk and worst is not None else None,
+        "mfe_r": round(best / risk, 4) if risk and best is not None else None,
+        "bars_to_mfe_peak": bars_to_peak if risk and best is not None else None,
+        "post_stop_recovered": recovered,
+    }
+
+    if outcome is not None:
+        return Resolution(outcome, bars_at_outcome, outcome_r, **anatomy)
+
+    return Resolution(OUTCOME_UNRESOLVED, checked, None, **anatomy)
 
 
 def load_rows(path: Path = SHADOW_FILE) -> List[dict]:
@@ -368,12 +456,18 @@ def resolve_pending(path: Path = SHADOW_FILE, bar_fetcher=fetch_bars_for) -> int
             if getattr(bar, "timestamp", now) <= horizon_end
         ]
 
+        try:
+            entry_price = float(row.get("reference_price") or 0) or None
+        except (TypeError, ValueError):
+            entry_price = None
+
         resolution = resolve_from_bars(
             bars=bars,
             side=row["side"],
             stop_price=float(row["stop_price"]),
             target_price=float(row["target_price"]),
             start_time=logged_at,
+            entry_price=entry_price,
         )
 
         # Still inside its window and undecided — leave it for next time.
@@ -386,6 +480,17 @@ def resolve_pending(path: Path = SHADOW_FILE, bar_fetcher=fetch_bars_for) -> int
         row["bars_checked"] = resolution.bars_checked
         row["resolved_at"] = now.isoformat()
         row["r_multiple"] = "" if resolution.r_multiple is None else resolution.r_multiple
+
+        # The anatomy. Blank rather than a guess when it could not be
+        # measured -- an absent excursion must not read as a zero one.
+        for field, value in (
+            ("mae_r", resolution.mae_r),
+            ("mfe_r", resolution.mfe_r),
+            ("bars_to_mfe_peak", resolution.bars_to_mfe_peak),
+            ("post_stop_recovered", resolution.post_stop_recovered),
+        ):
+            row[field] = "" if value is None else value
+
         resolved_count += 1
 
     save_rows(rows, path)
@@ -565,6 +670,65 @@ def _self_test() -> int:
     stop_first = bars((99, 97), (105, 104))
     result = resolve_from_bars(stop_first, "LONG", 98, 104, start)
     check("whichever comes first wins", result.outcome == OUTCOME_STOP)
+
+    # ---- trade anatomy, 39a7685e
+    #
+    # The verdict must not move. The walk now continues past the first
+    # touch to measure the path, and if that changed any outcome the
+    # entire shadow record would be rewritten by a measurement change.
+    print("Anatomy: the verdict is unchanged by measuring the path")
+
+    check("a stop that later reaches target is STILL a STOP",
+          resolve_from_bars(stop_first, "LONG", 98, 104, start,
+                            entry_price=100).outcome == OUTCOME_STOP)
+    check("and still -1R",
+          resolve_from_bars(stop_first, "LONG", 98, 104, start,
+                            entry_price=100).r_multiple == -1.0)
+    check("bars_checked still counts to the DECISION, not the window",
+          resolve_from_bars(stop_first, "LONG", 98, 104, start,
+                            entry_price=100).bars_checked == 1)
+
+    print("Anatomy: the noise-vs-trend flag")
+
+    recovered = resolve_from_bars(stop_first, "LONG", 98, 104, start,
+                                  entry_price=100)
+    check("a stop whose target arrives later is flagged recovered",
+          recovered.post_stop_recovered is True)
+
+    never = resolve_from_bars(bars((99, 97), (99, 98)), "LONG", 98, 104,
+                              start, entry_price=100)
+    check("a stop that never recovers is flagged False",
+          never.post_stop_recovered is False)
+
+    won = resolve_from_bars(bars((101, 100), (104, 102)), "LONG", 98, 104,
+                            start, entry_price=100)
+    check("a winner has no recovery flag at all",
+          won.post_stop_recovered is None)
+
+    print("Anatomy: excursions in R")
+
+    # Entry 100, stop 98 -> 1R is $2. High 103 is +1.5R, low 99 is -0.5R.
+    path = resolve_from_bars(bars((101, 99), (103, 100)), "LONG", 98, 104,
+                             start, entry_price=100)
+    check("mfe is measured in R", abs(path.mfe_r - 1.5) < 1e-9)
+    check("mae is measured in R and is negative",
+          abs(path.mae_r - (-0.5)) < 1e-9)
+    check("bars_to_mfe_peak names the bar", path.bars_to_mfe_peak == 2)
+    check("mae <= 0 <= mfe", path.mae_r <= 0 <= path.mfe_r)
+
+    print("Anatomy: it stays absent rather than guessing")
+
+    bare = resolve_from_bars(stop_first, "LONG", 98, 104, start)
+    check("no entry price means no anatomy, not a zero one",
+          bare.mae_r is None and bare.mfe_r is None)
+    check("but the outcome is unaffected", bare.outcome == OUTCOME_STOP)
+    check("a zero entry price is refused too",
+          resolve_from_bars(stop_first, "LONG", 98, 104, start,
+                            entry_price=0).mae_r is None)
+
+    check("the new columns are in the schema",
+          {"mae_r", "mfe_r", "bars_to_mfe_peak",
+           "post_stop_recovered"} <= set(COLUMNS))
 
     print("File round trip:")
     temp = Path(tempfile.gettempdir()) / "shadow_selftest.csv"
