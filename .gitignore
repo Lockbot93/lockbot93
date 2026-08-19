@@ -82,3 +82,19 @@ __pycache__/
 .idea/
 Thumbs.db
 desktop.ini
+
+# ---------------------------------------------------------------------------
+# EXPORT BUNDLES AND GENERATED REPORTS  (added 2026-08-19)
+#
+# solas_handover/ is a point-in-time copy of the source, made to onboard
+# another agent. It is already stale -- its options_contracts.py is 921
+# lines against 1,121 live -- and on 2026-08-19 it polluted a grep for the
+# debit-cap defect, returning the old code as though it were running.
+#
+# This is the *_OLD / *_backup / *_v0_N problem the project deliberately
+# removed on 2026-08-06. Git holds the history those copies were standing
+# in for. Regenerate the bundle when it is needed; never track it.
+solas_handover/
+options_tradeable_*.csv
+options_tradeable_latest.txt
+watchdog.log
