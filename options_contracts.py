@@ -65,7 +65,88 @@ TOO_EXPENSIVE = "TOO_EXPENSIVE"
 RISK_TOO_HIGH = "RISK_TOO_HIGH"
 NO_SPREAD_PARTNER = "NO_SPREAD_PARTNER"
 
+# A spread whose NET debit exceeds the per-trade risk cap.
+#
+# Deliberately distinct from RISK_TOO_HIGH, which is the single-leg
+# full-debit refusal, so the two can be counted separately. They express
+# the same rule on different instruments, and how often each binds is the
+# evidence for whether OPTIONS_MAX_RISK_PER_TRADE_PERCENT is set right.
+DEBIT_EXCEEDS_RISK_CAP = "DEBIT_EXCEEDS_RISK_CAP"
+
 CONTRACT_MULTIPLIER = 100
+
+
+# ---------------------------------------------------------------------------
+# The debit ceiling -- ONE authority, because it was bypassed twice
+# ---------------------------------------------------------------------------
+
+def debit_ceiling(
+    account_equity: float,
+    *,
+    max_risk_percent: float,
+    max_debit_percent: float | None = None,
+) -> float:
+    """The most premium one position may commit, in dollars.
+
+    Defaults to the per-trade risk limit so the orphaned worst case equals
+    risk already accepted.
+    """
+
+    return account_equity * (
+        max_risk_percent if max_debit_percent is None else max_debit_percent
+    )
+
+
+def debit_within_ceiling(
+    debit: float,
+    account_equity: float,
+    *,
+    max_risk_percent: float,
+    max_debit_percent: float | None = None,
+) -> tuple[bool, float, str]:
+    """Does this debit fit under the ceiling? Returns (ok, ceiling, why).
+
+    THE ONLY PLACE THE RULE LIVES, and it exists because the same rule was
+    written three times and disagreed with itself twice.
+
+      2026-08-13  evaluate_contract gained a full-debit cap. Single legs
+                  only.
+      2026-08-17  select_vertical_spread was still testing
+                  `net_debit * stop_loss_percent`, roughly 2.9x looser, so
+                  every spread LOCKBOT held had entered through it. Fixed.
+      2026-08-19  options_scanner was found re-checking the BUFFERED debit
+                  -- the number actually submitted -- as `debit * 0.35`
+                  again. So a spread could clear selection at the ceiling,
+                  gain the 3% entry buffer, and be submitted above it.
+
+    Three call sites, three chances to measure the wrong thing, and two of
+    them did. The rule now has one home and the callers ask it.
+
+    Why the debit and never the stop distance: Alpaca has no stop order
+    type for options, so options_manager IS the stop and nothing rests at
+    the broker. If it stops running the position loses the entire debit.
+    A ceiling measured against a software-only stop measures something
+    nobody will enforce -- and the controller was down nine hours over
+    2026-08-15/16, so that is a description of what happens, not a worry.
+    """
+
+    ceiling = debit_ceiling(
+        account_equity,
+        max_risk_percent=max_risk_percent,
+        max_debit_percent=max_debit_percent,
+    )
+
+    if debit <= ceiling:
+        return True, ceiling, ""
+
+    return (
+        False,
+        ceiling,
+        f"${debit:.2f} of premium exceeds the ${ceiling:.2f} per-trade "
+        f"ceiling. Max loss is the full debit: Alpaca has no stop order "
+        f"type for options, so options_manager is the only stop and "
+        f"nothing rests at the broker to cap this.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +371,7 @@ def evaluate_contract(
     require_nonzero_bid: bool = True,
     underlying_price: float | None = None,
     max_moneyness_percent: float = 0.07,
+    max_debit_percent: float | None = None,
 ) -> ContractVerdict:
     """
     Apply every entry gate to one contract.
@@ -371,6 +453,39 @@ def evaluate_contract(
             f"risks ${dollars_at_risk:.2f}, above the ${risk_cap:.2f} "
             "per-trade ceiling. One contract cannot be subdivided.",
         )
+
+    # THE FULL DEBIT IS THE REAL WORST CASE, NOT THE STOP DISTANCE.
+    #
+    # The check above sizes against a 35% stop, which assumes the stop can
+    # be executed. For options that assumption rests entirely on
+    # options_manager staying alive: Alpaca offers no bracket, no stop
+    # order type and no GTC on options, so there is nothing resting at the
+    # broker that fires on a loss. If that process dies, the position runs
+    # to expiry and the loss is the WHOLE premium.
+    #
+    # Sizing on the stop alone therefore authorises far more than the
+    # accepted risk. Measured at $650 equity on 2026-08-12: the stop rule
+    # admits a $185.71 debit, which is 28.6% of the account per position
+    # and 85.7% across three slots, all of it undefended if the manager
+    # stops.
+    #
+    # Capping the FULL debit at the same per-trade limit makes the
+    # orphaned worst case equal to risk already accepted -- $65.00 here,
+    # 10.0% per position and 30.0% across three. It is a tightening: every
+    # contract this rejects was already reachable under the old rule.
+    # Defaults to the per-trade risk limit, so the orphaned worst case
+    # equals risk already accepted. Kept as its own parameter rather than
+    # reusing max_risk_percent silently, so the rule is visible at the
+    # call site and testable on its own.
+    fits, _ceiling, why = debit_within_ceiling(
+        quote.cost_to_open,
+        account_equity,
+        max_risk_percent=max_risk_percent,
+        max_debit_percent=max_debit_percent,
+    )
+
+    if not fits:
+        return ContractVerdict(quote, RISK_TOO_HIGH, why)
 
     return ContractVerdict(quote, OK, "Passed every entry gate.")
 
@@ -527,12 +642,39 @@ def select_vertical_spread(
         if net_debit > premium_cap:
             continue
 
-        # Risk is measured the same way as for a single leg: what the
-        # software stop is expected to cost. Worth being explicit that
-        # this is the INTENDED loss, not the worst case -- a gap through
-        # the stop can cost the entire debit, on a spread exactly as on
-        # an outright.
-        if net_debit * stop_loss_percent > risk_cap:
+        # The NET debit is the max loss, and the max loss is what gets
+        # capped.
+        #
+        # This tested `net_debit * stop_loss_percent > risk_cap` until
+        # 2026-08-17 -- the INTENDED loss if the software stop fires, not
+        # the worst case. At a 35% stop that is 2.9x looser than the debit,
+        # and it admitted two $155 spreads against a $59 cap on an account
+        # of $587: 24% of equity each, on a rule that reads as 10%.
+        #
+        # The old comment claimed this matched the single-leg path. That
+        # stopped being true on 2026-08-14, when evaluate_contract gained a
+        # full-debit ceiling and this did not -- so the spread path was the
+        # only way into the book, and every position LOCKBOT held had been
+        # admitted by the looser of two rules that claimed to be one.
+        #
+        # Why the debit and not the stop: Alpaca has no stop order type for
+        # options, so options_manager IS the stop. Nothing rests at the
+        # broker. If that process is not running the position loses the
+        # whole debit, and the controller was down for nine hours over
+        # 2026-08-15/16. A cap measured against a software-only stop is
+        # measuring something nobody will enforce.
+        #
+        # Refused outright rather than rescued. Narrowing the strikes or
+        # tightening the stop to force a fit would be choosing the trade
+        # first and the risk limit second.
+        fits, _ceiling, why = debit_within_ceiling(
+            net_debit, account_equity, max_risk_percent=max_risk_percent
+        )
+
+        if not fits:
+            verdicts.append(
+                ContractVerdict(long_leg, DEBIT_EXCEEDS_RISK_CAP, why)
+            )
             continue
 
         return (long_leg, short_leg), verdicts
@@ -662,8 +804,14 @@ def _self_test() -> int:
             days_to_expiration=dte,
         )
 
+    # Equity raised from 250 to 750 on 2026-08-12, when the full-debit cap
+    # was added. These gates exist to exercise the DELTA, DTE, spread and
+    # moneyness checks; at 250 the new debit ceiling is $25 and a $70
+    # contract fails it before those checks can be reached, which tests
+    # the cap rather than what these cases are about. The cap has its own
+    # dedicated checks below, at a stated equity.
     gates = dict(
-        account_equity=250.0,
+        account_equity=750.0,
         max_spread_percent=0.10,
         min_dte=21,
         max_dte=45,
@@ -704,11 +852,50 @@ def _self_test() -> int:
     # $0.73 x 100 = $73, which is under the $75 premium cap. But a 35%
     # stop on it risks $25.55, just over the $25 per-trade ceiling — so
     # the risk gate is the one that has to catch this.
+    # Run at the SMALL equity: the point is that a risk ceiling bites
+    # before the premium ceiling does, and at $750 a $73 contract clears
+    # both, so the case only exists on a small account.
     risky = make(36.0, 0.72, 0.73)
     check(
         "risk ceiling binds before premium ceiling",
-        evaluate_contract(risky, **gates).status == RISK_TOO_HIGH,
-        evaluate_contract(risky, **gates).status,
+        evaluate_contract(risky, **dict(gates, account_equity=250.0)).status
+        == RISK_TOO_HIGH,
+        evaluate_contract(risky, **dict(gates, account_equity=250.0)).status,
+    )
+
+    # ---- the full-debit cap, added 2026-08-12
+    #
+    # With no broker-side stop on options, the whole premium is the worst
+    # case if options_manager stops running. Sizing on the 35% stop alone
+    # authorised 28.6% of equity per position and 85.7% across three slots.
+    small = dict(gates, account_equity=250.0)
+    check(
+        "the full debit is capped, not just the stop distance",
+        evaluate_contract(make(36.0, 0.66, 0.70), **small).status == RISK_TOO_HIGH,
+        evaluate_contract(make(36.0, 0.66, 0.70), **small).status,
+    )
+    check(
+        "and the rejection names the missing broker stop",
+        "options_manager" in evaluate_contract(make(36.0, 0.66, 0.70),
+                                               **small).detail,
+    )
+    check(
+        "a debit inside the cap still passes",
+        evaluate_contract(make(36.0, 0.22, 0.24), **small).accepted,
+        evaluate_contract(make(36.0, 0.22, 0.24), **small).detail,
+    )
+    check(
+        "the cap is a TIGHTENING -- it never admits what the stop rule refused",
+        not evaluate_contract(make(36.0, 0.72, 0.73), **small).accepted,
+    )
+    check(
+        "it can be set independently of the risk percent",
+        not evaluate_contract(make(36.0, 0.66, 0.70),
+                              **dict(gates, max_debit_percent=0.05)).accepted,
+    )
+    check(
+        "and defaults to the risk percent when unset",
+        evaluate_contract(make(36.0, 0.66, 0.70), **gates).accepted,
     )
 
     far_dated = make(36.0, 0.66, 0.70, dte=90)
@@ -759,9 +946,14 @@ def _self_test() -> int:
           str(winner.strike if winner else None))
     check("reports every verdict", len(verdicts) == 3, str(len(verdicts)))
 
+    # Re-priced 2026-08-17. The short leg was 0.60/0.63, making a $44 net
+    # debit against this fixture's $25 cap ($250 equity x 10%) -- which the
+    # net-debit ceiling now correctly refuses. These checks exist to prove
+    # LEG SELECTION (lower bought, higher sold, net below the outright), so
+    # the fixture moved under the cap rather than the cap moving for it.
     spread_chain = [
         make(36.0, 1.00, 1.04, delta=0.51),
-        make(37.0, 0.60, 0.63, delta=0.40),
+        make(37.0, 0.82, 0.85, delta=0.40),
     ]
 
     pair, _ = select_vertical_spread(
@@ -819,6 +1011,97 @@ def _self_test() -> int:
         "spread rescues an unaffordable long leg",
         pricey_pair is not None,
     )
+
+    print()
+    print("The ceiling has ONE home")
+
+    ok, ceiling, why = debit_within_ceiling(50.0, 650.0, max_risk_percent=0.10)
+    check("a debit under the ceiling fits", ok and ceiling == 65.0, str(ceiling))
+    check("and gives no complaint", why == "")
+
+    ok2, _, why2 = debit_within_ceiling(155.0, 650.0, max_risk_percent=0.10)
+    check("a debit over it does not", not ok2)
+    check("and the reason names options_manager, not the stop distance",
+          "options_manager" in why2 and "0.35" not in why2, why2)
+
+    at, _, _ = debit_within_ceiling(65.0, 650.0, max_risk_percent=0.10)
+    over, _, _ = debit_within_ceiling(65.01, 650.0, max_risk_percent=0.10)
+    check("exactly at the ceiling fits", at)
+    check("a cent over does not", not over)
+
+    check("the ceiling scales with equity",
+          debit_ceiling(650.0, max_risk_percent=0.10) == 65.0
+          and debit_ceiling(500.0, max_risk_percent=0.10) == 50.0)
+    check("and max_debit_percent overrides it when given",
+          debit_ceiling(650.0, max_risk_percent=0.10,
+                        max_debit_percent=0.05) == 32.5)
+
+    # The 08-19 defect in one assertion: the buffered debit is what gets
+    # submitted, so the ceiling must be applied AFTER the buffer, not before.
+    ceiling_650 = debit_ceiling(650.0, max_risk_percent=0.10)
+    buffered = ceiling_650 * 1.03
+    check(
+        "a debit at the ceiling FAILS once the 3% entry buffer is added",
+        not debit_within_ceiling(buffered, 650.0, max_risk_percent=0.10)[0],
+        f"{buffered:.2f} vs {ceiling_650:.2f}",
+    )
+
+    print()
+    print("The NET debit is capped, because the stop is software only")
+
+    # A debit vertical's max loss IS the net debit. options_manager is the
+    # only stop -- Alpaca has no stop order type for options -- so when it
+    # is not running the loss is the whole debit, not the stop distance.
+    # The controller was down for nine hours over 2026-08-15/16.
+    #
+    # Sized against a $650 account at a 10% cap: the ceiling is $65.00.
+    def spread_of(long_ask, short_bid, equity=650.0, risk=0.10):
+        return select_vertical_spread(
+            [make(36.0, long_ask - 0.04, long_ask, delta=0.55),
+             make(37.0, short_bid, short_bid + 0.04, delta=0.42)],
+            underlying_price=36.0, contract_type="call", width_strikes=1,
+            min_dte=21, max_dte=45, delta_min=0.35, delta_max=0.60,
+            stop_loss_percent=0.35, max_spread_percent=0.20,
+            account_equity=equity, max_premium_percent=0.30,
+            max_risk_percent=risk,
+        )
+
+    # $155 net -- the INTC and NVDA shape. Old rule: 155 x 0.35 = $54.25,
+    # under the cap, admitted. New rule: $155 > $65.00, refused.
+    over_pair, over_verdicts = spread_of(2.55, 1.00)
+    check("a $155 net debit is REFUSED at a $65 cap", over_pair is None)
+    check(
+        "and it is refused for the debit, not for the stop distance",
+        any(v.status == DEBIT_EXCEEDS_RISK_CAP for v in over_verdicts),
+        str(sorted({v.status for v in over_verdicts})),
+    )
+    check(
+        "the reason is distinct from RISK_TOO_HIGH on singles",
+        DEBIT_EXCEEDS_RISK_CAP != RISK_TOO_HIGH,
+    )
+
+    # $38 net -- the SOFI shape. Under the cap either way.
+    under_pair, _ = spread_of(1.10, 0.72)
+    check("a $38 net debit is still ADMITTED", under_pair is not None)
+
+    # Boundary: exactly at the cap must pass, one cent over must not.
+    at_cap, _ = spread_of(1.65, 1.00)          # (1.65 - 1.00) x 100 = $65.00
+    check("exactly at the cap is admitted", at_cap is not None)
+
+    over_cap, _ = spread_of(1.66, 1.00)        # $66.00
+    check("one dollar over the cap is refused", over_cap is None)
+
+    # The relaxation at the leg level must survive: a long leg that is
+    # individually unaffordable is still fine if the short leg pays it down.
+    rescued, _ = spread_of(3.00, 2.45)         # $55 net, $300 long leg
+    check(
+        "an unaffordable long leg still builds when the NET fits",
+        rescued is not None,
+    )
+
+    # Raising the cap deliberately is the remedy, not measuring on the stop.
+    raised, _ = spread_of(2.55, 1.00, risk=0.25)   # $155 net vs $162.50 cap
+    check("raising the risk percent admits it again", raised is not None)
 
     print()
 

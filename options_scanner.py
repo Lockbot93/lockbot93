@@ -40,6 +40,9 @@ USAGE
 from __future__ import annotations
 
 import csv
+
+# One owner for CSV header migration across every journal.
+import csv_schema
 import json
 import os
 import sys
@@ -47,6 +50,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import lockbot_config as config
@@ -223,16 +227,35 @@ def check_portfolio_room(
             f"{config.OPTIONS_MAX_NEW_ENTRIES_PER_CYCLE} per-cycle limit.",
         )
 
+    # The ceiling FLOATS with live equity while committed premium is fixed
+    # at the entry debits -- so a losing book walks the ceiling down toward
+    # what is already committed and this gate closes without anything new
+    # happening. On 2026-08-17 that was $352.14 against $348.00 committed:
+    # $4.14 of headroom, where $650 of equity would have given $42.00.
+    #
+    # Said explicitly because the owner reads these summaries: a block here
+    # is NOT "no setups found". It is the account being full, and it can
+    # arrive on a cycle where nothing was bought and no signal changed.
     premium_ceiling = account_equity * config.OPTIONS_MAX_TOTAL_PREMIUM_PERCENT
 
     if committed_premium >= premium_ceiling:
         return PortfolioGate(
             False,
-            f"${committed_premium:.2f} of premium committed, at the "
-            f"${premium_ceiling:.2f} ceiling.",
+            f"PREMIUM CEILING REACHED — ${committed_premium:.2f} committed "
+            f"against a ${premium_ceiling:.2f} ceiling "
+            f"({config.OPTIONS_MAX_TOTAL_PREMIUM_PERCENT:.0%} of "
+            f"${account_equity:,.2f} equity). This is the account being "
+            f"full, not an absence of setups. The ceiling falls as equity "
+            f"does, so it can close on a cycle where nothing was bought.",
         )
 
-    return PortfolioGate(True, "Room available.")
+    headroom = premium_ceiling - committed_premium
+
+    return PortfolioGate(
+        True,
+        f"Room available — ${headroom:.2f} of premium headroom under the "
+        f"${premium_ceiling:.2f} ceiling.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -303,28 +326,247 @@ def migrate_shadow_header(path: Any) -> bool:
     return True
 
 
-def append_shadow_row(row: dict[str, Any]) -> None:
-    """Append one decision to the shadow log, creating it when needed."""
+# Quote samples for execution_cost.py. Written from inside the scan, at
+# the one moment the full chain is in hand.
+#
+# WHY THIS EXISTS: options were switched live on 2026-08-14 with the
+# execution-cost collectors unwired, so the first live trades this project
+# has ever placed would have gone unmeasured on the single largest
+# controllable term in the book -- spread drag currently measures 5.88x
+# the entire gross modelled result. Measuring the cost afterwards is not
+# possible: an order record carries the price paid, never the book it was
+# paid into.
+#
+# The WHOLE chain is logged, not just the chosen contract. Section 4 of
+# execution_cost compares strike roundness and monthly-versus-weekly
+# WITHIN one underlying, which needs several strikes per name; logging
+# only the winner would make that permanently unanswerable. Rejected
+# contracts are the honest denominator -- they are what the gate chose
+# from -- and passed_gate is recorded so the two populations can be
+# separated later rather than silently conflated.
+#
+# No thinning by time of day. Section 3 measures spread BY session
+# bucket, so a sampler whose rate depends on the clock would confound the
+# exact thing it exists to measure.
+QUOTE_SAMPLE_COLUMNS = [
+    "timestamp",
+    "symbol",
+    "option_symbol",
+    "strike",
+    "expiry",
+    "bid",
+    "ask",
+    "mid",
+    "delta",
+    "days_to_expiration",
+    "underlying_price",
+    "passed_gate",
+    "verdict",
+]
+
+
+# Refusals seen this run. Counted here rather than only at call sites so
+# a caller that forgets to check the return value cannot make a refusal
+# invisible -- there are eight call sites and one missed would be enough.
+_shadow_refusals = 0
+
+
+def reset_shadow_refusals() -> None:
+    """Zero the refusal counter at the start of a scan."""
+
+    global _shadow_refusals
+    _shadow_refusals = 0
+
+
+def shadow_refusals() -> int:
+    """How many shadow writes were refused this run."""
+
+    return _shadow_refusals
+
+
+def _refuse_collector(path: Any, refusal: Exception, what: str) -> None:
+    """Shared handling for a collector whose file cannot be safely written.
+
+    Counted, alerted once per FILE per day, and never re-raised. The
+    per-file keying is what makes "one deduped alert per stream" true when
+    more than one collector exists.
+    """
+
+    global _shadow_refusals
+
+    _shadow_refusals += 1
+    print(f"  {what} REFUSED, nothing written: {refusal}")
+
+    try:
+        from notifications import send_smart_notification
+
+        send_smart_notification(
+            symbol=getattr(path, "name", str(path)),
+            event_type="SCHEMA_REFUSED",
+            title=f"{what} refused",
+            message=(
+                f"{getattr(path, 'name', path)} has a header this code cannot "
+                "safely write. Collection has stopped; trading is unaffected."
+            ),
+            reason=str(refusal)[:300],
+            cooldown_minutes=1440,
+        )
+    except Exception:
+        pass                          # an alert failure must not cascade
+
+
+def log_quote_samples(
+    quotes: Any,
+    *,
+    underlying_symbol: str,
+    underlying_price: Any = None,
+    verdicts: Any = None,
+) -> int:
+    """Record every quote in one chain. Returns rows written.
+
+    NEVER RAISES INTO THE ORDER PATH. This runs inside the scan that then
+    submits an order, so a logging fault must not stop a trade being
+    placed -- exactly the boundary LOCKBOT ruled for append_shadow_row on
+    2026-08-13. Refusals are counted and fold into summary.errors, so the
+    heartbeat cannot stamp HEALTHY over a collector that has stalled.
+
+    Rows are written immediately rather than buffered to end-of-scan. A
+    buffer is faster and loses the whole session's samples if the process
+    dies mid-scan, which on this project has happened.
+    """
+
+    path = getattr(config, "EXECUTION_QUOTE_SAMPLES_FILE",
+                   config.PROJECT_FOLDER / "execution_quote_samples.csv")
+
+    if not quotes:
+        return 0
+
+    try:
+        header = csv_schema.ensure_schema(path, QUOTE_SAMPLE_COLUMNS,
+                                          verbose=False)
+    except csv_schema.SchemaRefused as refusal:
+        _refuse_collector(path, refusal, "quote sample log")
+        return 0
+    except Exception as error:                       # never break the scan
+        print(f"  quote sample log unavailable: {type(error).__name__}: {error}")
+        return 0
+
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    verdict_by_symbol = {}
+
+    if verdicts:
+        for verdict in verdicts:
+            quote = getattr(verdict, "quote", None)
+            if quote is not None:
+                verdict_by_symbol[getattr(quote, "symbol", "")] = verdict
+
+    written = 0
+
+    try:
+        with Path(path).open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=header,
+                                    extrasaction="ignore")
+
+            for quote in quotes:
+                symbol = getattr(quote, "symbol", "")
+                verdict = verdict_by_symbol.get(symbol)
+                bid = getattr(quote, "bid", None)
+                ask = getattr(quote, "ask", None)
+                mid = None
+
+                if bid is not None and ask is not None and ask >= bid:
+                    mid = round((float(bid) + float(ask)) / 2.0, 4)
+
+                writer.writerow({
+                    "timestamp": stamp,
+                    "symbol": underlying_symbol,
+                    "option_symbol": symbol,
+                    "strike": getattr(quote, "strike", ""),
+                    "expiry": getattr(quote, "expiration", ""),
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": "" if mid is None else mid,
+                    # Blank, never 0.0, when the feed omits it.
+                    "delta": ("" if getattr(quote, "delta", None) is None
+                              else quote.delta),
+                    "days_to_expiration": getattr(quote, "days_to_expiration", ""),
+                    "underlying_price": "" if underlying_price is None
+                                        else underlying_price,
+                    "passed_gate": ("" if verdict is None
+                                    else str(bool(getattr(verdict, "accepted", False)))),
+                    "verdict": "" if verdict is None
+                               else getattr(verdict, "status", ""),
+                })
+                written += 1
+
+    except Exception as error:
+        print(f"  quote sample write failed: {type(error).__name__}: {error}")
+        return written
+
+    return written
+
+
+def append_shadow_row(row: dict[str, Any]) -> bool:
+    """Append one decision to the shadow log. True when written.
+
+    RETURNS A BOOL AND NEVER RAISES INTO THE ORDER PATH.
+
+    csv_schema refuses a file whose header is wider than SHADOW_COLUMNS,
+    because that means the running code is older than the file. That
+    refusal is correct, but this function is called from inside the scan
+    that submits orders, so it must not propagate: a logging fault must
+    never stop a trade being recorded or an exit being placed.
+
+    Swallowing it silently would be the opposite mistake, so the refusal
+    is counted, and run_options_scan folds the count into summary.errors.
+    That last part is the load-bearing bit -- LOCKBOT's catch on
+    2026-08-13. The end-of-run branch reads `if summary.errors:` and
+    otherwise stamps the module HEALTHY, so a degraded mark set here
+    would be overwritten every five minutes and the scanner would certify
+    itself healthy over a shadow log that had stopped accumulating.
+
+    Only SchemaRefused is caught. An OSError is a different fault and
+    must not be hidden behind a schema message.
+    """
+
+    global _shadow_refusals
 
     path = config.OPTIONS_SHADOW_FILE
 
-    # Bring the file up to the current schema before appending. Without
-    # this, adding a column silently misaligns every row written after it.
-    migrate_shadow_header(path)
+    try:
+        header = csv_schema.ensure_schema(path, SHADOW_COLUMNS, verbose=False)
+    except csv_schema.SchemaRefused as refusal:
+        _shadow_refusals += 1
+        print(f"  shadow log REFUSED, row not written: {refusal}")
 
-    is_new = not path.exists()
+        try:
+            from notifications import send_smart_notification
+
+            send_smart_notification(
+                symbol=path.name,
+                event_type="SCHEMA_REFUSED",
+                title="Options shadow log refused",
+                message=(
+                    f"{path.name} has a header this code cannot safely write. "
+                    "Shadow logging has stopped; trading is unaffected."
+                ),
+                reason=str(refusal)[:300],
+                cooldown_minutes=1440,
+            )
+        except Exception:
+            pass                      # an alert failure must not cascade
+
+        return False
 
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=SHADOW_COLUMNS,
+            fieldnames=header,
             extrasaction="ignore",
         )
-
-        if is_new:
-            writer.writeheader()
-
         writer.writerow(row)
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +711,14 @@ class OptionsScannerSummary:
     contracts_rejected: int = 0
     orders_submitted: int = 0
     shadow_logged: int = 0
+    # Quote rows written for execution_cost. Zero across a session with
+    # candidates means the collector has stalled.
+    quotes_sampled: int = 0
+    # Shadow writes REFUSED because the log's header is one this code
+    # cannot safely write. Folded into errors before the heartbeat is
+    # stamped, so the scanner cannot report HEALTHY over a shadow log
+    # that has stopped accumulating.
+    shadow_refused: int = 0
     errors: int = 0
     skip_reason: str = ""
     duration_seconds: float = 0.0
@@ -502,6 +752,10 @@ def run_options_scanner() -> OptionsScannerSummary:
 
     started_at = time.perf_counter()
     summary = OptionsScannerSummary()
+
+    # Zero the refusal counter, so a count from a previous run in the
+    # same process cannot leak into this one's heartbeat.
+    reset_shadow_refusals()
 
     mark_module_starting(
         MODULE_NAME,
@@ -971,6 +1225,18 @@ def run_options_scanner() -> OptionsScannerSummary:
                         summary.rejection_reasons.get(verdict.status, 0) + 1
                     )
 
+            # Record the whole chain with its gate verdicts, for
+            # execution_cost. Placed AFTER selection so passed_gate is
+            # known, and before the order path so a chain that produced no
+            # trade is still measured -- the rejected contracts are the
+            # denominator the gate chose from.
+            summary.quotes_sampled += log_quote_samples(
+                quotes,
+                underlying_symbol=symbol,
+                underlying_price=candidate.get("price"),
+                verdicts=verdicts,
+            )
+
             if long_quote is None:
                 summary.contracts_rejected += 1
 
@@ -999,8 +1265,23 @@ def run_options_scanner() -> OptionsScannerSummary:
 
             debit = limit_per_contract * CONTRACT_MULTIPLIER
             risk_at_stop = debit * config.OPTIONS_STOP_LOSS_PERCENT
-            risk_ceiling = (
-                account_equity * config.OPTIONS_MAX_RISK_PER_TRADE_PERCENT
+
+            # THIS is the number that reaches the broker. A limit order
+            # cannot fill above its limit, so capping the BUFFERED debit
+            # here is what makes the ceiling real rather than advisory --
+            # selection capped the raw quote, and the 3% entry buffer is
+            # added afterwards.
+            #
+            # Until 2026-08-19 this re-check computed `debit * 0.35` and
+            # compared THAT to the ceiling, which is the very measure the
+            #08-17 fix removed from selection. So a spread could clear
+            # selection at the ceiling, gain the buffer, and be submitted
+            # above it. Routed through debit_within_ceiling so there is one
+            # rule rather than three that disagree.
+            debit_ok, risk_ceiling, debit_why = contracts.debit_within_ceiling(
+                debit,
+                account_equity,
+                max_risk_percent=config.OPTIONS_MAX_RISK_PER_TRADE_PERCENT,
             )
 
             print(
@@ -1011,14 +1292,13 @@ def run_options_scanner() -> OptionsScannerSummary:
             )
             print(f"  Debit ${debit:.2f}, risk at stop ${risk_at_stop:.2f}")
 
-            if risk_at_stop > risk_ceiling:
-                print(
-                    f"  Rejected: the entry buffer lifts risk to "
-                    f"${risk_at_stop:.2f}, above the ${risk_ceiling:.2f} "
-                    "ceiling."
-                )
-                summary.rejection_reasons["BUFFERED_RISK_TOO_HIGH"] = (
-                    summary.rejection_reasons.get("BUFFERED_RISK_TOO_HIGH", 0) + 1
+            if not debit_ok:
+                print(f"  Rejected: {debit_why}")
+                summary.rejection_reasons[contracts.DEBIT_EXCEEDS_RISK_CAP] = (
+                    summary.rejection_reasons.get(
+                        contracts.DEBIT_EXCEEDS_RISK_CAP, 0
+                    )
+                    + 1
                 )
                 continue
 
@@ -1283,6 +1563,12 @@ def run_options_scanner() -> OptionsScannerSummary:
 
         summary.duration_seconds = round(time.perf_counter() - started_at, 3)
 
+        # A refused shadow write is an error for heartbeat purposes.
+        # Without this the branch below stamps HEALTHY and the scanner
+        # certifies itself sound over a log that stopped accumulating.
+        summary.shadow_refused = shadow_refusals()
+        summary.errors += summary.shadow_refused
+
         details = asdict(summary)
         details["version"] = OPTIONS_SCANNER_VERSION
         details["shadow_mode"] = config.OPTIONS_SHADOW_MODE
@@ -1312,6 +1598,7 @@ def run_options_scanner() -> OptionsScannerSummary:
         print(f"No contract     : {summary.contracts_rejected}")
         print(f"Orders submitted: {summary.orders_submitted}")
         print(f"Shadow logged   : {summary.shadow_logged}")
+        print(f"Quotes sampled  : {summary.quotes_sampled}")
         print(f"Errors          : {summary.errors}")
         print(f"Duration        : {summary.duration_seconds:.2f} seconds")
 
@@ -1586,6 +1873,55 @@ def _self_test() -> int:
     check("claiming inside the cycle blocks the second", "EWZ" in engaged)
 
     print()
+    print("No entry path may size the cap on the software stop")
+
+    # LOCKBOT acceptance clause 2, asserted against the source rather than
+    # trusted: the cap DECISION must never be debit x stop. Reporting a
+    # stop figure is fine; gating on one is the defect.
+    import re as _re
+    _src = Path(__file__).read_text(encoding="utf-8")
+    _run = _src.split("def _self_test")[0]
+
+    check(
+        "the buffered debit is gated by debit_within_ceiling",
+        "contracts.debit_within_ceiling(" in _run,
+    )
+    check(
+        "the old BUFFERED_RISK_TOO_HIGH gate is gone",
+        "BUFFERED_RISK_TOO_HIGH" not in _run,
+    )
+    check(
+        "no comparison gates on a stop-scaled debit",
+        not _re.search(r"if\s+risk_at_stop\s*>", _run),
+    )
+    check(
+        "rejections reuse the shared reason code",
+        "contracts.DEBIT_EXCEEDS_RISK_CAP" in _run,
+    )
+
+    # The ceiling itself, exercised through the same authority the scanner
+    # now calls, at the equity LOCKBOT actually has.
+    _eq = 500.64
+    _ceil = contracts.debit_ceiling(
+        _eq, max_risk_percent=config.OPTIONS_MAX_RISK_PER_TRADE_PERCENT)
+    check(
+        f"at ${_eq:,.2f} equity the ceiling is ${_ceil:.2f}",
+        abs(_ceil - _eq * config.OPTIONS_MAX_RISK_PER_TRADE_PERCENT) < 1e-9,
+    )
+    check(
+        "a $155 spread -- the INTC and NVDA shape -- is refused there",
+        not contracts.debit_within_ceiling(
+            155.0, _eq,
+            max_risk_percent=config.OPTIONS_MAX_RISK_PER_TRADE_PERCENT)[0],
+    )
+    check(
+        "a $38 spread -- the SOFI shape -- still fits",
+        contracts.debit_within_ceiling(
+            38.0, _eq,
+            max_risk_percent=config.OPTIONS_MAX_RISK_PER_TRADE_PERCENT)[0],
+    )
+
+    print()
     print("Options buying power")
 
     class FakeAccount:
@@ -1665,12 +2001,253 @@ def _self_test() -> int:
         print(f"{len(failures)} check(s) FAILED: {', '.join(failures)}")
         return 1
 
+    # ---- shadow-log schema refusal, 2026-08-13
+    #
+    # The write path must never raise into the order path, and a refusal
+    # must never be stamped HEALTHY. LOCKBOT's catch: the end-of-run
+    # branch reads `if summary.errors:` and otherwise marks the module
+    # healthy, so counting the refusal is what makes the degraded state
+    # survive the next five minutes.
+    print()
+    print("Shadow-log schema refusal")
+
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    original_file = config.OPTIONS_SHADOW_FILE
+    probe = _Path(_tempfile.gettempdir()) / "options_shadow_refusal_test.csv"
+    probe.unlink(missing_ok=True)
+
+    try:
+        wider = list(SHADOW_COLUMNS) + ["written_by_newer_code"]
+        with probe.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=wider)
+            writer.writeheader()
+            writer.writerow({c: "" for c in wider}
+                            | {"underlying": "KEEP", "written_by_newer_code": "KEEP ME"})
+        before_bytes = probe.read_bytes()
+
+        config.OPTIONS_SHADOW_FILE = probe
+        reset_shadow_refusals()
+
+        # Intercept the alert rather than sending one. The first version
+        # of this test pushed a real notification to the owner's phone,
+        # which a self-test documented as offline must never do. Capturing
+        # it also lets the notification CONTRACT be asserted.
+        import notifications as _notifications
+
+        real_send = _notifications.send_smart_notification
+        captured: dict[str, Any] = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return None
+
+        _notifications.send_smart_notification = _capture
+        try:
+            wrote = append_shadow_row({"timestamp": "x", "underlying": "NOPE",
+                                       "action": "CANDIDATE"})
+        finally:
+            _notifications.send_smart_notification = real_send
+
+        check("a refused append returns False rather than raising", wrote is False)
+        check("the refusal is counted", shadow_refusals() == 1)
+        check("the alert is keyed by FILE, not by a trading symbol",
+              captured.get("symbol") == probe.name)
+        check("and by event_type SCHEMA_REFUSED",
+              captured.get("event_type") == "SCHEMA_REFUSED")
+        check("with a one-per-day cooldown",
+              captured.get("cooldown_minutes") == 1440)
+        check("and it says trading is unaffected",
+              "trading is unaffected" in str(captured.get("message", "")).lower())
+        check("and the file is left byte-identical",
+              probe.read_bytes() == before_bytes)
+        check("the newer code's column survives",
+              "KEEP ME" in probe.read_text(encoding="utf-8"))
+
+        # The load-bearing one: a counted refusal must reach summary.errors,
+        # or the heartbeat stamps HEALTHY over a log that stopped logging.
+        fake = OptionsScannerSummary()
+        fake.shadow_refused = shadow_refusals()
+        fake.errors += fake.shadow_refused
+        check("a refusal reaches summary.errors, so HEALTHY cannot be stamped",
+              fake.errors > 0)
+        check("and is reported on its own line, not merged into errors alone",
+              "shadow_refused" in asdict(fake))
+
+        # A healthy file still writes, and writes against the verified header.
+        clean = _Path(_tempfile.gettempdir()) / "options_shadow_clean_test.csv"
+        clean.unlink(missing_ok=True)
+        config.OPTIONS_SHADOW_FILE = clean
+        reset_shadow_refusals()
+
+        check("a fresh file is created and written",
+              append_shadow_row({"timestamp": "t", "underlying": "AAA",
+                                 "action": "CANDIDATE"}) is True)
+        check("with no refusal recorded", shadow_refusals() == 0)
+        rows = csv_schema.read_rows(clean)
+        check("and the row reads back correctly",
+              len(rows) == 1 and rows[0]["underlying"] == "AAA")
+        clean.unlink(missing_ok=True)
+
+    finally:
+        config.OPTIONS_SHADOW_FILE = original_file
+        reset_shadow_refusals()
+        probe.unlink(missing_ok=True)
+
+    # ---- quote sampler for execution_cost, 2026-08-14
+    print()
+    print("Quote sampler")
+
+    class _Q:
+        def __init__(self, symbol, strike, bid, ask, delta=None):
+            self.symbol = symbol
+            self.strike = strike
+            self.bid = bid
+            self.ask = ask
+            self.delta = delta
+            self.expiration = "2026-09-18"
+            self.days_to_expiration = 35
+
+    class _V:
+        def __init__(self, quote, accepted, status):
+            self.quote = quote
+            self.accepted = accepted
+            self.status = status
+
+    samples = _Path(_tempfile.gettempdir()) / "exec_quote_sampler_test.csv"
+    samples.unlink(missing_ok=True)
+    original_samples = getattr(config, "EXECUTION_QUOTE_SAMPLES_FILE", None)
+    config.EXECUTION_QUOTE_SAMPLES_FILE = samples
+
+    try:
+        chain = [_Q("AAA260918C00090000", 90.0, 1.00, 1.04, 0.45),
+                 _Q("AAA260918C00095000", 95.0, 0.40, 0.60, 0.20),
+                 _Q("AAA260918C00100000", 100.0, 0.10, 0.14, None)]
+        verdicts = [_V(chain[0], True, "OK"),
+                    _V(chain[1], False, "DELTA_OUT_OF_RANGE"),
+                    _V(chain[2], False, "SPREAD_TOO_WIDE")]
+
+        written = log_quote_samples(chain, underlying_symbol="AAA",
+                                    underlying_price=91.20, verdicts=verdicts)
+        check("the WHOLE chain is sampled, not just the winner", written == 3)
+
+        rows = csv_schema.read_rows(samples)
+        check("rejected contracts are kept as the honest denominator",
+              len(rows) == 3)
+        check("and are marked as rejected rather than conflated",
+              sum(1 for r in rows if r["passed_gate"] == "False") == 2)
+        check("the gate verdict is recorded per contract",
+              rows[1]["verdict"] == "DELTA_OUT_OF_RANGE")
+        check("mid is computed from the two-sided quote",
+              abs(float(rows[0]["mid"]) - 1.02) < 1e-9)
+        check("a missing delta is blank, never 0.0", rows[2]["delta"] == "")
+        check("execution_cost can read what was written",
+              all(k in rows[0] for k in ("timestamp", "bid", "ask", "symbol",
+                                         "strike", "expiry")))
+
+        # It must never raise into the order path.
+        wider = _Path(_tempfile.gettempdir()) / "exec_quote_wider_test.csv"
+        wider.unlink(missing_ok=True)
+        wider_cols = list(QUOTE_SAMPLE_COLUMNS) + ["newer"]
+        with wider.open("w", newline="", encoding="utf-8") as handle:
+            csv.DictWriter(handle, fieldnames=wider_cols).writeheader()
+        config.EXECUTION_QUOTE_SAMPLES_FILE = wider
+        reset_shadow_refusals()
+
+        import notifications as _n
+        real = _n.send_smart_notification
+        _n.send_smart_notification = lambda **kw: None
+        try:
+            got = log_quote_samples(chain, underlying_symbol="AAA")
+        finally:
+            _n.send_smart_notification = real
+
+        check("a refused sample log returns 0 rather than raising", got == 0)
+        check("and the refusal is counted so HEALTHY cannot be stamped",
+              shadow_refusals() == 1)
+        check("an empty chain writes nothing and is not an error",
+              log_quote_samples([], underlying_symbol="AAA") == 0)
+        wider.unlink(missing_ok=True)
+
+        check("the summary reports what was sampled",
+              "quotes_sampled" in asdict(OptionsScannerSummary()))
+    finally:
+        if original_samples is None:
+            if hasattr(config, "EXECUTION_QUOTE_SAMPLES_FILE"):
+                delattr(config, "EXECUTION_QUOTE_SAMPLES_FILE")
+        else:
+            config.EXECUTION_QUOTE_SAMPLES_FILE = original_samples
+        samples.unlink(missing_ok=True)
+        reset_shadow_refusals()
+
+    check("the repair heuristic is out of the write path",
+          "migrate_shadow_header" not in append_shadow_row.__doc__ if
+          append_shadow_row.__doc__ else True)
+
     print("All options-scanner checks passed.")
+    return 0
+
+
+def _repair_shadow_log() -> int:
+    """Deliberate, offline repair of an askew shadow log.
+
+    DEMOTED FROM THE WRITE PATH on 2026-08-13, per LOCKBOT's ruling.
+    migrate_shadow_header realigns rows using a LENGTH HEURISTIC -- a row
+    whose length matches the current schema is assumed already correct,
+    anything else is remapped from the old header. That guess was right
+    for the specific 15-under-14 incident of 2026-08-02, and running it
+    automatically on every append meant a guess sat permanently in the
+    write path.
+
+    csv_schema refuses rather than guesses, which is the correct default.
+    This stays available for the case the refusal is diagnosing, and is
+    GATED on the file actually failing a strict read -- so it cannot be
+    run casually against a healthy file and quietly rewrite it.
+    """
+
+    path = config.OPTIONS_SHADOW_FILE
+
+    if not path.exists():
+        print(f"{path.name} does not exist. Nothing to repair.")
+        return 0
+
+    try:
+        csv_schema.read_rows(path)
+    except csv_schema.SchemaRefused as refusal:
+        print(f"{path.name} fails a strict read:\n  {refusal}\n")
+    else:
+        header = csv_schema.read_header(path)
+        if header == SHADOW_COLUMNS:
+            print(f"{path.name} reads clean and its header matches the "
+                  "schema. Nothing to repair, and this tool refuses to "
+                  "rewrite a healthy file.")
+            return 0
+        print(f"{path.name} reads clean but its header differs from the "
+              "schema. Repairing.\n")
+
+    backup = path.with_name(path.name + ".pre-repair")
+    backup.write_bytes(path.read_bytes())
+    print(f"backup written to {backup.name}")
+
+    before = len(csv_schema.read_rows(path, strict=False))
+    changed = migrate_shadow_header(path)
+    after = len(csv_schema.read_rows(path, strict=False))
+
+    print(f"rewritten: {changed}.  rows {before} -> {after}")
+
+    if before != after:
+        print("ROW COUNT CHANGED. Restore the backup and investigate.")
+        return 1
+
     return 0
 
 
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         sys.exit(_self_test())
+
+    if "--repair" in sys.argv:
+        sys.exit(_repair_shadow_log())
 
     run_options_scanner()
