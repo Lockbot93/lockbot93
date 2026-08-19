@@ -98,3 +98,4 @@ solas_handover/
 options_tradeable_*.csv
 options_tradeable_latest.txt
 watchdog.log
+config_sweep_state.json

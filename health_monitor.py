@@ -594,6 +594,73 @@ def print_system_assessment(
     print(f"Overall Status        : {overall_status}")
 
 
+def run_config_sweep() -> None:
+    """Once a day, check that no setting configures nothing.
+
+    Lives here rather than in its own scheduled module on LOCKBOT's ruling
+    of 2026-08-19 (channel item d8372ec3), and the reasoning is the point:
+    an unscheduled checker is the exact defect class it checks for, so it
+    must attach to something whose execution there is continuous evidence
+    of. health_monitor beats on every controller cycle. A new module or a
+    second scheduled task would be one more thing that can silently never
+    run -- which is how watchdog.py went unscheduled since the project
+    began, and why nothing reported the nine-hour outage of 08-15/16.
+
+    Gated on date change rather than a timer, because the failure is
+    introduced at edit time and costs nothing per hour undetected. Reports
+    only; deletion stays a human act.
+
+    Never raises. A reporting tool must not be able to take down the
+    module that reports on everything else.
+    """
+
+    try:
+        import config_sweep
+    except Exception as error:                       # noqa: BLE001
+        print(f"\nConfig sweep unavailable: {type(error).__name__}: {error}")
+        return
+
+    try:
+        if not config_sweep.should_run_today():
+            return
+
+        result = config_sweep.sweep()
+        config_sweep.record_run()
+
+        print()
+        config_sweep.report(result)
+
+        if result.clean:
+            return
+
+        from system_heartbeat import mark_module_degraded
+
+        mark_module_degraded(
+            "CONFIG_SWEEP",
+            message=result.summary(),
+            error="",
+        )
+
+        from notifications import send_smart_notification
+
+        # Keyed on the finding itself, so a standing orphan alerts once
+        # rather than every day until somebody deletes it.
+        send_smart_notification(
+            symbol="CONFIG",
+            event_type="CONFIG_SWEEP",
+            title="LOCKBOT: config that configures nothing",
+            message=(
+                f"{result.summary()}\n\n"
+                "These read as settings and control nothing. Reported, not "
+                "deleted -- deletion is a human act."
+            ),
+            reason=", ".join(result.orphans + result.unreasoned),
+            cooldown_minutes=1440,
+        )
+    except Exception as error:                       # noqa: BLE001
+        print(f"\nConfig sweep failed: {type(error).__name__}: {error}")
+
+
 def main() -> None:
     """Run the complete LOCKBOT health inspection."""
 
@@ -624,6 +691,8 @@ def main() -> None:
     print()
     print_system_assessment(broker, module_results)
     print("=" * 78)
+
+    run_config_sweep()
 
 
 def _self_test() -> int:
