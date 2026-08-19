@@ -22,17 +22,36 @@ COMPLETED_TRADES_FILE = Path(__file__).with_name(
 def calculate_r_multiple(
     profit_loss: float,
     initial_risk_dollars: float,
-) -> float:
-    """Calculate the trade's R-multiple."""
+) -> float | None:
+    """The trade's R-multiple, or None when it cannot be computed.
 
-    if initial_risk_dollars <= 0:
-        return 0.0
+    Returns None -- never 0.0 -- when the risk is missing or non-positive.
+    A trade whose risk is unknown has an UNKNOWN R, and 0.0 does not mean
+    unknown, it means broke even.
+
+    This project has made that mistake twice. `simulate_symbol` left
+    timed-out trades at an r_multiple of 0.0 and thereby recorded them as
+    having made exactly nothing, which at a 3:1 reward ratio was most of
+    the result rather than a rounding detail. The shadow book censored its
+    aged-out rows the same way until 2026-08-10. A default value is a
+    claim.
+    """
+
+    if not initial_risk_dollars or initial_risk_dollars <= 0:
+        return None
 
     return profit_loss / initial_risk_dollars
 
 
-def assign_grade(r_multiple: float) -> str:
-    """Convert an R-multiple into a letter grade."""
+def assign_grade(r_multiple: float | None) -> str:
+    """Convert an R-multiple into a letter grade.
+
+    An unknown R grades as "?" rather than falling through to F. An
+    ungradeable trade is not a failed one.
+    """
+
+    if r_multiple is None:
+        return "?"
 
     if r_multiple >= 2.0:
         return "A+"
@@ -55,8 +74,8 @@ def assign_grade(r_multiple: float) -> str:
 def grade_trade(
     profit_loss: float,
     initial_risk_dollars: float,
-) -> tuple[float, str]:
-    """Return the R-multiple and letter grade."""
+) -> tuple[float | None, str]:
+    """Return the R-multiple and letter grade. R is None when unknown."""
 
     r_multiple = calculate_r_multiple(
         profit_loss,
@@ -129,12 +148,17 @@ def display_trade_grades(
             initial_risk,
         )
 
+        # An unknown R prints as "--", not as 0.00R. The formatter would
+        # raise on None, and coercing it to zero is the very claim this
+        # module stopped making.
+        r_text = "    --" if r_multiple is None else f"{r_multiple:>6.2f}"
+
         print(
             f"{symbol:<6} | "
             f"{side:<5} | "
             f"P/L: ${profit_loss:>9.2f} | "
             f"Risk: ${initial_risk:>9.2f} | "
-            f"R: {r_multiple:>6.2f}R | "
+            f"R: {r_text}R | "
             f"Grade: {grade}"
         )
 

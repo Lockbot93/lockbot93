@@ -168,16 +168,41 @@ def _daily_title(
     report_date: date,
     daily_stats: PerformanceStats,
 ) -> str:
-    """Choose the daily report notification title."""
+    """Choose the daily report notification title.
+
+    Judged on the WHOLE account, not on closed equity trades alone.
+
+    On 2026-08-14 this returned "LOCKBOT DAILY PROFIT" with a green dot
+    while the account was down $23: two small equity trades had closed
+    green and an open option position was down $25. The title is the only
+    part most readers see -- it arrives as a phone notification -- so a
+    headline computed from a subset of the book is the most consequential
+    place in this file to get it wrong, not the least.
+
+    Falls back to the closed-trade view when the broker is unreachable,
+    and marks it, because an unlabelled fallback is how the original
+    defect read as fact.
+    """
+
+    snapshot = broker_snapshot()
+
+    if snapshot is not None:
+        change = snapshot["equity"] - snapshot["previous_equity"]
+
+        if change > 0:
+            return "🟢 LOCKBOT DAILY PROFIT"
+        if change < 0:
+            return "🔴 LOCKBOT DAILY LOSS"
+        return "⚪ LOCKBOT DAILY BREAKEVEN"
 
     if daily_stats.total_trades == 0:
         return "📊 LOCKBOT DAILY REPORT"
 
     if daily_stats.net_profit > 0:
-        return "🟢 LOCKBOT DAILY PROFIT"
+        return "🟢 LOCKBOT CLOSED TRADES UP (account unknown)"
 
     if daily_stats.net_profit < 0:
-        return "🔴 LOCKBOT DAILY LOSS"
+        return "🔴 LOCKBOT CLOSED TRADES DOWN (account unknown)"
 
     return "⚪ LOCKBOT DAILY BREAKEVEN"
 
@@ -257,6 +282,146 @@ def _open_options_positions() -> list[dict[str, Any]]:
     return list(raw.values()) if isinstance(raw, dict) else []
 
 
+def _equity_line(overall_stats: Any) -> str:
+    """The account balance line, preferring the broker over arithmetic.
+
+    Falls back to the journal reconstruction only when the broker cannot
+    be reached, and says so in the label. The old line said "Estimated
+    equity" while being read as an account balance; a reader cannot tell
+    a $25 discrepancy from a rounding difference unless the source is
+    named.
+    """
+
+    snapshot = broker_snapshot()
+
+    if snapshot is not None:
+        change = snapshot["equity"] - snapshot["previous_equity"]
+        base = snapshot["previous_equity"]
+        percent = f" ({change / base:+.2%})" if base else ""
+
+        return (
+            f"Account equity: ${snapshot['equity']:,.2f}  "
+            f"(cash ${snapshot['cash']:,.2f}, from the broker)\n"
+            f"WHOLE ACCOUNT TODAY: {_format_money(change)}{percent}  "
+            "-- includes open positions"
+        )
+
+    return (
+        f"Equity from closed trades only: "
+        f"${overall_stats.estimated_current_equity:,.2f}  "
+        "[BROKER UNREACHABLE -- excludes open positions]"
+    )
+
+
+def broker_snapshot() -> dict[str, Any] | None:
+    """The account as the BROKER sees it, not as the journals infer it.
+
+    Written 2026-08-14, when the owner noticed the report claimed
+    "+$2.95, estimated equity $652.95" on a day the account was actually
+    down $23 at $628.09. Both numbers were defensible in isolation and
+    the pair was badly misleading:
+
+      * the P&L counts CLOSED trades, and the only real event that day
+        was an OPEN option position losing $25, so the loss was invisible
+      * "Estimated equity" was never an account balance at all. It is
+        `account_equity_at_entry` of the FIRST journalled trade plus the
+        sum of closed profits -- an arithmetic reconstruction that drifts
+        further from reality with every open position and every deposit.
+
+    A journal-derived estimate is the right tool for judging a strategy,
+    because it isolates what the strategy did. It is the wrong tool for
+    answering "how much do I have", and the report was using one label
+    for both jobs.
+
+    Returns None when the broker cannot be reached. Callers must show the
+    journal estimate LABELLED as an estimate in that case, never silently
+    substitute it -- that substitution is the whole defect.
+
+    Cached for the life of the process. Three callers need this -- the
+    title, the equity line and the options section -- and three separate
+    reads would let a moving price produce a report whose headline
+    disagrees with its own body. One report describes one instant.
+    """
+
+    global _SNAPSHOT_CACHE
+
+    if _SNAPSHOT_CACHE is not _UNREAD:
+        return _SNAPSHOT_CACHE
+
+    _SNAPSHOT_CACHE = _read_broker_snapshot()
+    return _SNAPSHOT_CACHE
+
+
+# Sentinel, because None is a real answer here -- it means the broker was
+# reached for and could not be. Using None as "not yet read" would retry
+# on every caller precisely when the broker is down.
+_UNREAD = object()
+_SNAPSHOT_CACHE: Any = _UNREAD
+
+
+def _read_broker_snapshot() -> dict[str, Any] | None:
+    """Do the actual broker read. Call broker_snapshot() instead."""
+
+    try:
+        import os
+
+        import lockbot_config as config
+        from alpaca.trading.client import TradingClient
+        from dotenv import load_dotenv
+
+        import position_filters
+
+        load_dotenv()
+
+        client = TradingClient(
+            os.getenv(config.ALPACA_API_KEY_ENV),
+            os.getenv(config.ALPACA_SECRET_KEY_ENV),
+            paper=config.PAPER_TRADING,
+        )
+
+        account = client.get_account()
+        positions = client.get_all_positions()
+
+        legs: dict[str, float] = {}
+        for leg in position_filters.option_positions(positions):
+            legs[str(leg.symbol).upper()] = float(leg.market_value or 0.0)
+
+        return {
+            "equity": float(account.equity),
+            # last_equity is the broker's own mark at the previous close,
+            # which is the only day-change figure that includes open
+            # positions. Deriving it from the journals cannot work: an
+            # unclosed trade contributes nothing to a journal by
+            # definition, and that is exactly what went unreported.
+            "previous_equity": float(account.last_equity),
+            "cash": float(account.cash),
+            "option_legs": legs,
+        }
+    except Exception:  # noqa: BLE001 -- a report must still print offline
+        return None
+
+
+def open_position_value(position: dict, legs: dict[str, float]) -> float | None:
+    """Net market value of one tracked option position, or None.
+
+    A spread is two broker rows and its worth is the sum of them: the long
+    leg positive, the short leg negative. Returns None when any leg is
+    missing rather than reporting a partial figure -- a half-priced spread
+    is not a smaller number, it is a wrong one.
+    """
+
+    symbols = [
+        str(position.get(key) or "").upper()
+        for key in ("long_symbol", "short_symbol")
+        if position.get(key)
+    ]
+
+    if not symbols or any(symbol not in legs for symbol in symbols):
+        return None
+
+    return sum(legs[symbol] for symbol in symbols)
+
+
 def build_options_section(report_date: date) -> str:
     """Build the options half of the daily report.
 
@@ -325,8 +490,17 @@ def build_options_section(report_date: date) -> str:
         lines.append("No options trades closed today.")
 
     if open_positions:
+        # An open position was previously reported at COST only, which
+        # made a losing trade indistinguishable from a winning one and
+        # let a $25 loss sit unmentioned under a "+$2.95" headline.
+        snapshot = broker_snapshot()
+        legs = (snapshot or {}).get("option_legs", {})
+
         lines.append("")
         lines.append(f"Open positions: {len(open_positions)}")
+
+        unrealized = 0.0
+        priced = 0
 
         for position in open_positions:
             try:
@@ -337,11 +511,30 @@ def build_options_section(report_date: date) -> str:
             filled = position.get("entry_filled")
             state = "" if filled else "  [entry not filled yet]"
 
+            value = open_position_value(position, legs)
+
+            if value is None:
+                worth = "  worth: no quote"
+            else:
+                change = value - debit
+                percent = f" ({change / debit:+.1%})" if debit else ""
+                worth = f"  now ${value:,.2f}  {_format_money(change)}{percent}"
+                unrealized += change
+                priced += 1
+
             lines.append(
                 f"  {position.get('underlying', '?')} "
                 f"{position.get('strategy', '?')} "
                 f"exp {position.get('expiration', '?')} "
                 f"cost ${debit:,.2f}{state}"
+            )
+            lines.append(f"   {worth}")
+
+        if priced:
+            lines.append(
+                f"Unrealized on open options: {_format_money(unrealized)}"
+                + ("" if priced == len(open_positions)
+                   else f"  ({priced} of {len(open_positions)} priced)")
             )
 
     if all_trades:
@@ -446,6 +639,7 @@ def build_daily_report_message(
     # options were the only thing trading at all.
     options_section = build_options_section(report_date)
     portfolio_section = build_portfolio_section()
+    equity_line = _equity_line(overall_stats)
 
     if not daily_trades:
         return (
@@ -461,8 +655,7 @@ def build_daily_report_message(
             f"{overall_stats.win_rate_percent:.2f}%\n"
             f"Net P/L: "
             f"{_format_money(overall_stats.net_profit)}\n"
-            f"Estimated equity: "
-            f"${overall_stats.estimated_current_equity:,.2f}\n"
+            f"{equity_line}\n"
             f"{options_section}"
             f"{portfolio_section}"
         )
@@ -515,8 +708,7 @@ def build_daily_report_message(
         f"{overall_stats.win_rate_percent:.2f}%\n"
         f"Overall net P/L: "
         f"{_format_money(overall_stats.net_profit)}\n"
-        f"Estimated equity: "
-        f"${overall_stats.estimated_current_equity:,.2f}\n"
+        f"{equity_line}\n"
         f"{options_section}"
         f"{portfolio_section}"
     )

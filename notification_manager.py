@@ -234,7 +234,17 @@ def build_completed_trade_message(
         f"{_format_duration(
             stats.average_holding_minutes
         )}\n"
-        f"Estimated equity: "
+        # Named for what it IS. This is the first journalled trade's
+        # entry equity plus the sum of CLOSED profits -- it has never
+        # read the account, so it omits every open position and every
+        # deposit. Labelled "Estimated equity" it read as a balance, and
+        # on 2026-08-14 it told the owner $652.95 against a real $628.09
+        # because a $25 options loss was still open. The number is the
+        # right one for judging the equity strategy in isolation; only
+        # the label was a lie. daily_report.py reads the broker instead;
+        # a per-trade notification should not, since it fires on the exit
+        # path and must stay fast and offline-safe.
+        f"Equity book, closed trades only: "
         f"${stats.estimated_current_equity:,.2f}"
     )
 

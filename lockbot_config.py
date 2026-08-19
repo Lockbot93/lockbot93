@@ -101,7 +101,34 @@ LIVE_TRADING_ENABLED = False
 #
 # Every entry from here carries a horizon tag (trade_horizon.py), so this
 # is also the first data that can be grouped by holding period.
-EQUITY_ENTRIES_ENABLED = True
+#
+# ---------------------------------------------------------------------
+# OFF again 2026-08-14, owner's instruction: options only.
+#
+# Note what this reverses. The 08-07 note above records the owner taking
+# LOCKBOT's recommendation to run EQUITY first and keep options in shadow,
+# on the reasoning that options lose faster per trade -- 20.2% against a
+# 41.2% breakeven versus 16.7% against 33.3%. The account is now doing
+# the opposite of that on both halves: options live, equity entries off.
+# The owner was shown the current figures and chose it; recorded here so
+# the reversal is legible rather than looking like drift.
+#
+# WHAT THIS DOES NOT STOP, and the distinction matters:
+#   market_scanner still SCANS and still SHADOW-LOGS every setup, so the
+#   equity shadow book -- 497 rows, 192 decided, the measurement engine
+#   every open question in this project depends on -- keeps accumulating
+#   at the new 150-symbol rate. Only order submission stops.
+#   Existing positions are untouched. T and IEMG hold working broker-side
+#   bracket legs; trade_manager and position_monitor keep reconciling and
+#   journalling them.
+#   The buy-and-hold sleeve is a SEPARATE switch (ETF_PORTFOLIO_ENABLED)
+#   and is deliberately left alone -- it is not the trading engine, it is
+#   52% of the account, and it is the only thing here that has
+#   outperformed. Turning it off is its own decision.
+#
+# ROLLBACK: set back to True.
+# ---------------------------------------------------------------------
+EQUITY_ENTRIES_ENABLED = False
 
 # Bracket orders are LOCKBOT's sole exit mechanism. Keep this False —
 # position_monitor.py must stay monitoring/alerting only. See its
@@ -254,8 +281,20 @@ UNIVERSE_MIN_BARS = 15
 #
 # IMPORTANT: universe.py rewrites universe.csv from scratch, so the
 # daily order is universe.py FIRST, then universe_volatility.py.
-UNIVERSE_MIN_ATR_PERCENT = 0.0125
-UNIVERSE_MAX_ATR_PERCENT = 0.030
+# BROAD MARKET, 2026-08-13 (agent_channel c6812f3a). Was 1.25%-3.00%/day.
+#
+# This band, not UNIVERSE_TOP_N, was what actually sized the pool: TOP_N
+# has been 150 all along and the volatility filter cut it to about 42. So
+# widening here is the change that opens the universe, and it does so by
+# roughly 3.5x without touching any rate limit.
+#
+# Set wide rather than removed, so the filter still runs, still writes
+# universe_volatility_report.csv, and can be re-narrowed by editing two
+# numbers. They cannot go to zero -- validate_configuration requires
+# 0 < min < 0.5 and 0 < max < 1.0 -- so these are the practical
+# equivalent of off.
+UNIVERSE_MIN_ATR_PERCENT = 0.001
+UNIVERSE_MAX_ATR_PERCENT = 0.500
 
 # 0 means rank by liquidity rather than apply an absolute floor.
 # Keep it at 0 while using the free IEX feed, which reports only a
@@ -277,7 +316,17 @@ UNIVERSE_BATCH_PAUSE_SECONDS = 0.35
 
 # Data feed used for both the universe build and the scan.
 # "iex" is the free feed. Switch to "sip" only with a paid data plan.
+#
+# This one must STAY "iex". It is what the live scanner can actually see:
+# live SIP is refused on this plan, so a universe or a scan built on SIP
+# would describe a bot that cannot be deployed.
 ALPACA_DATA_FEED = "iex"
+
+# NOT a setting: a SHADOW_DATA_FEED constant was added here on 2026-08-10
+# and removed the same night on LOCKBOT's ruling. An unwired constant is
+# the b16e2f2a defect class — a switch that reads as configuration while
+# controlling nothing. Reinstate it only together with the code that
+# consults it, and only after the owner has decided on the feed.
 
 
 # ============================================================
@@ -318,9 +367,22 @@ ATR_MAX_STOP_PERCENT = 0.060
 # ============================================================
 
 SCAN_INTERVAL_SECONDS = 300
-POSITION_MONITOR_INTERVAL_SECONDS = 300
-TRADE_MANAGER_INTERVAL_SECONDS = 300
-HEALTH_MONITOR_INTERVAL_SECONDS = 300
+# POSITION_MONITOR_INTERVAL_SECONDS, TRADE_MANAGER_INTERVAL_SECONDS and
+# HEALTH_MONITOR_INTERVAL_SECONDS stood here at 300 each until 2026-08-19.
+# Deleted on LOCKBOT's ruling (item 1c2b28b6).
+#
+# They said each module has its own cadence. None of them ever did. The
+# controller runs all four scripts in sequence inside ONE cycle governed by
+# SCAN_INTERVAL_SECONDS -- see lockbot_controller.py, which calls
+# SCANNER_FILE, TRADE_MANAGER_FILE, POSITION_MONITOR_FILE and the two
+# options scripts one after another.
+#
+# The lie was harmless only because all three read 300, the same as
+# SCAN_INTERVAL_SECONDS. It would have become real the moment somebody
+# edited one expecting an effect. Worse, two of them were published into
+# the state snapshot below, so LOCKBOT was being told a schedule that does
+# not exist -- which is how a wrong belief reaches the thing doing the
+# reasoning.
 PREMARKET_CHECK_SECONDS = 60
 
 
@@ -458,10 +520,29 @@ if ACCOUNT_PROFILE == "small":
     # Set to 0 to disable the check.
     MAX_DAY_TRADES_PER_5_DAYS = 3
 
-    # Cheap stocks only, or nothing is affordable. A $50 ceiling
-    # means every position buys at least two shares.
-    UNIVERSE_MIN_PRICE = 5.00
-    UNIVERSE_MAX_PRICE = 50.00
+    # BROAD MARKET, 2026-08-13 (agent_channel c6812f3a).
+    #
+    # Was $5-$50, on the reasoning "cheap stocks only, or nothing is
+    # affordable; a $50 ceiling means every position buys at least two
+    # shares." That was written at ~$250 of equity and is now stale.
+    #
+    # The owner's directive is to stop excluding by this band and by the
+    # 1.25-3.00%/day volatility band. Both are widened rather than deleted,
+    # so the mechanism survives and the pool can be re-narrowed later
+    # without restoring code.
+    #
+    # The ceiling is not arbitrary: at MAX_POSITION_VALUE_PERCENT of 0.40
+    # a $650 account can put $260 into one position, so above roughly that
+    # price a name cannot be bought at even one whole share. $250 keeps
+    # nearly everything in the universe theoretically tradable instead of
+    # spending scan slots on names that can never fill. REVISIT THIS IF
+    # EQUITY MOVES MATERIALLY -- it is a function of account size, not a
+    # property of the market.
+    #
+    # Expect POSITION_SIZE_CALCULATION_FAILED rejections to rise anyway.
+    # That is the sizing gate doing its job on a wider pool, not a fault.
+    UNIVERSE_MIN_PRICE = 1.00
+    UNIVERSE_MAX_PRICE = 250.00
     UNIVERSE_TOP_N = 150
     MAX_SCAN_SYMBOLS = 150
 
@@ -497,33 +578,46 @@ else:  # "standard"
 HEARTBEAT_WARNING_MINUTES = 10
 HEARTBEAT_CRITICAL_MINUTES = 20
 
-CONTINUOUS_MODULES = {"CONTROLLER"}
+# CONTINUOUS_MODULES, SCHEDULED_MODULES and ON_DEMAND_MODULES stood here
+# until 2026-08-19. Deleted on LOCKBOT's ruling (item 1c2b28b6).
+#
+# Nothing read them. They described a scheduling model the controller does
+# not use.
+#
+# WHERE THE REAL SCHEDULE LIVES: lockbot_controller.py. It holds the script
+# paths (SCANNER_FILE, TRADE_MANAGER_FILE, POSITION_MONITOR_FILE,
+# HEALTH_MONITOR_FILE, OPTIONS_MANAGER_FILE, OPTIONS_SCANNER_FILE) and runs
+# them in a fixed sequence inside one cycle. There is no per-module
+# schedule and no module-group dispatch anywhere.
+#
+# This pointer exists because these sets had already misled a reader who
+# should know better: LOCKBOT's own 2026-08-08 watchdog ruling said
+# equity_time_stop would be "added to SCHEDULED_MODULES", as though that
+# set did something. It never did. Look in the controller.
 
-SCHEDULED_MODULES = {
-    "MARKET_SCANNER",
-    "POSITION_MONITOR",
-    "TRADE_MANAGER",
-    # OPTIONS_MANAGER is the software stop loss for every open option
-    # position. A stale heartbeat here means those positions are
-    # currently unprotected — treat it as urgently as a broker outage.
-    "OPTIONS_MANAGER",
-    "OPTIONS_SCANNER",
-}
-
-ON_DEMAND_MODULES = {"HEALTH_MONITOR"}
 
 
 # ============================================================
 # Notifications
 # ============================================================
 
-NOTIFY_ON_STARTUP = True
-NOTIFY_ON_SHUTDOWN = True
-NOTIFY_ON_TRADE_SIGNAL = True
-NOTIFY_ON_ORDER_SUBMISSION = True
-NOTIFY_ON_EXIT_SIGNAL = True
-NOTIFY_ON_CRITICAL_ERROR = True
-NOTIFY_ON_HEARTBEAT_DEGRADED = True
+# Seven NOTIFY_ON_* flags stood here, all True, until 2026-08-19.
+# Deleted on LOCKBOT's ruling (item 1c2b28b6), which called them the most
+# dangerous of the unwired set -- and the reason is worth keeping.
+#
+# Nothing read any of them. They read as owner-usable switches, so somebody
+# quietening a noisy channel by setting NOTIFY_ON_HEARTBEAT_DEGRADED=False
+# would believe they had done something, and would keep being paged. A
+# constant that looks like a control and is not is worse than no constant,
+# because it costs the reader their next hour rather than their next minute.
+#
+# If notification routing is worth having it returns as ONE item shipping
+# the flags AND the dispatch code together, with a self-test proving a
+# False flag actually suppresses the send. Never the flags first.
+#
+# Notification behaviour today lives in notifications.send_smart_notification,
+# which de-duplicates by symbol and event type on a cooldown. That is the
+# real control surface.
 
 
 # ============================================================
@@ -728,7 +822,42 @@ OPTIONS_ENABLED = True
 #
 # Set back to False when the evidence supports it, which is what
 # signal_research.py and backtest.py exist to establish.
-OPTIONS_SHADOW_MODE = True
+#
+# ---------------------------------------------------------------------
+# RESUMED 2026-08-14, by owner decision, with the evidence AGAINST it.
+#
+# Recorded honestly because the comment above says "when the evidence
+# supports it", and it does not. At the time of the flip:
+#
+#   options shadow book   8 of 28 decided = 28.6%
+#   breakeven needed      41.2% at the +50%/-35% bands
+#   direction of travel   it was 40.0% before the EXPIRED censoring fix;
+#                         every one of the eight rows that resolved since
+#                         has been a stop
+#   resolved net          +$5.05 -> -$12.95 once formerly-censored windows
+#                         are booked at mark to market
+#   spread drag           5.88x the entire gross modelled result
+#   the underlying signal 16.1% against a 33.3% breakeven on equities
+#
+# The owner was shown these figures and chose to proceed. That is their
+# call to make; this note exists so no future reader mistakes the flip
+# for a conclusion the measurements supported.
+#
+# WHAT NOW PROTECTS THE ACCOUNT, since this is the only stop that exists:
+#   full-debit cap        $65.18 per position (10% of equity)
+#   concurrent positions  3, so $195.54 = 30.0% of equity is undefended
+#                         if options_manager stops running
+#   PDT                   option round trips count; 3 per 5 days
+#
+# Alpaca offers no options bracket, no stop order type and no GTC, so
+# options_manager.py IS the stop loss. A stale OPTIONS_MANAGER heartbeat
+# is unprotected capital, not a reporting problem.
+#
+# ROLLBACK: set this back to True. It is the complete off switch for
+# options order submission and needs no other change. Open positions are
+# unaffected either way -- options_manager keeps running its exits.
+# ---------------------------------------------------------------------
+OPTIONS_SHADOW_MODE = False
 
 # Hard ceiling on what one option trade may lose, as a fraction of
 # equity. Premium x stop-loss percent must land under this or the
@@ -917,8 +1046,30 @@ OPTIONS_MAX_MONEYNESS_PERCENT = 0.07
 # This deliberately trades fewer entries for cheaper ones. Contracts
 # like the 6.5%-spread PBR call taken on 2026-07-30 no longer pass.
 OPTIONS_MAX_SPREAD_PERCENT = 0.05
-OPTIONS_MIN_OPEN_INTEREST = 100
-OPTIONS_MIN_CONTRACT_VOLUME = 10
+
+# OPTIONS_MIN_OPEN_INTEREST (100) and OPTIONS_MIN_CONTRACT_VOLUME (10)
+# stood here until 2026-08-19. Deleted on LOCKBOT's ruling (item 87431cac),
+# and the reason is worth more than the constants were.
+#
+# NOTHING EVER READ THEM. Not a wiring gap either: ContractQuote carries no
+# open_interest or volume field, so the data was never fetched. They could
+# not have been enforced without a change to the chain fetch.
+#
+# They sat under the "Liquidity gates" heading beside the spread argument
+# above, formatted as settled policy, and were reported to the owner on
+# 2026-08-17 as active rules. They had never run. An unwired constant that
+# reads as configuration makes this file LIE about what the system does --
+# the b16e2f2a class, and the same standing rule that reverted
+# SHADOW_DATA_FEED on 08-11: reinstate a constant only together with its
+# wiring, never ahead of it.
+#
+# The idea is not dead, only this version of it. A liquidity gate may well
+# be worth having -- 4 of 10 entries since 07-30 went ENTRY_NOT_FILLED and
+# measured spread drag runs 5.88x the gross modelled result, both of which
+# point at thin books. It returns as its own item: ContractQuote extended
+# to carry open interest and volume, the quote-sampler data read to see
+# where fill failures actually cluster, and thresholds argued from that
+# rather than inherited from two numbers nobody can source.
 
 # A zero bid means there is no buyer at any price — the position
 # cannot be exited. Never enter one of these.
@@ -1022,7 +1173,12 @@ NOTIFY_REPEAT_COOLDOWN_MINUTES = 120
 # two holdings would have occupied every slot and silently blocked all
 # equity trading. position_filters.py now has 19 self-test checks
 # covering it.
-ETF_PORTFOLIO_ENABLED = True
+# Turned OFF 2026-08-14 on the owner's instruction to sell everything
+# except the option position. This flag must be cleared BEFORE the sleeve
+# is liquidated, not after: the module rebuilds toward
+# ETF_TARGET_ALLOCATION on the next controller cycle, so selling SCHD and
+# SCHG with this left True would simply buy them back within 5 minutes.
+ETF_PORTFOLIO_ENABLED = False
 
 # When False the module reports what it WOULD do and places nothing.
 ETF_PORTFOLIO_LIVE = True
@@ -1075,7 +1231,10 @@ ETF_REBALANCE_DRIFT_POINTS = 10.0
 # Never place a rebalancing order smaller than this. On a $100 budget a
 # "correcting" trade of a few dollars costs more in spread than the drift
 # it fixes.
-ETF_MIN_REBALANCE_DOLLARS = 25.00
+# ETF_MIN_REBALANCE_DOLLARS = 25.00 stood here until 2026-08-19. Deleted on
+# LOCKBOT's ruling (item 1c2b28b6): nothing read it, the ETF sleeve is off
+# (ETF_PORTFOLIO_ENABLED = False since 2026-08-14), and the rebalance path
+# that would have consulted it does not exist.
 
 ETF_PORTFOLIO_STATE_FILE = PROJECT_FOLDER / "etf_portfolio_state.json"
 
@@ -1224,17 +1383,28 @@ def validate_options_configuration() -> None:
 
     # The collision described at the top of this section. Warn rather
     # than raise: it is a property of the account size, not a mistake.
-    implied_max_premium = (
-        OPTIONS_MAX_RISK_PER_TRADE_PERCENT / OPTIONS_STOP_LOSS_PERCENT
+    #
+    # Corrected 2026-08-14. This used to quote risk/stop -- 28.6% at a 10%
+    # risk limit and a 35% stop -- which was the ceiling BEFORE the
+    # full-debit cap shipped on 2026-08-13. evaluate_contract now caps
+    # cost_to_open at the per-trade risk percent outright, because with no
+    # broker-side options stop the whole premium is the worst case. The
+    # binding ceiling is therefore 10%, not 28.6%, and printing the old
+    # number told a reader the account could take positions 2.9x larger
+    # than it will actually accept.
+    implied_max_premium = min(
+        OPTIONS_MAX_RISK_PER_TRADE_PERCENT / OPTIONS_STOP_LOSS_PERCENT,
+        OPTIONS_MAX_RISK_PER_TRADE_PERCENT,          # the full-debit cap
     )
 
     if implied_max_premium < OPTIONS_MAX_PREMIUM_PERCENT:
         print(
-            "NOTE: the options risk ceiling binds before the premium "
-            f"ceiling. Contracts above {implied_max_premium * 100:.1f}% of "
-            "equity will be rejected as unaffordable, so "
-            f"OPTIONS_MAX_PREMIUM_PERCENT ({OPTIONS_MAX_PREMIUM_PERCENT:.2f}) "
-            "is not reachable. This is expected on a small account."
+            "NOTE: the full-debit cap binds before the premium ceiling. "
+            f"Contracts above {implied_max_premium * 100:.1f}% of equity "
+            "will be rejected, so OPTIONS_MAX_PREMIUM_PERCENT "
+            f"({OPTIONS_MAX_PREMIUM_PERCENT:.2f}) is not reachable. The cap "
+            "assumes the software stop can fail, because it is the only "
+            "stop there is."
         )
 
 
@@ -1295,9 +1465,6 @@ def validate_configuration() -> None:
 
     for name, value in (
         ("SCAN_INTERVAL_SECONDS", SCAN_INTERVAL_SECONDS),
-        ("POSITION_MONITOR_INTERVAL_SECONDS", POSITION_MONITOR_INTERVAL_SECONDS),
-        ("TRADE_MANAGER_INTERVAL_SECONDS", TRADE_MANAGER_INTERVAL_SECONDS),
-        ("HEALTH_MONITOR_INTERVAL_SECONDS", HEALTH_MONITOR_INTERVAL_SECONDS),
     ):
         if value < 60:
             raise ValueError(f"{name} must be at least 60 seconds.")
@@ -1521,8 +1688,13 @@ def configuration_summary() -> dict[str, object]:
         "scan_batch_size": SCAN_BATCH_SIZE,
         "alpaca_data_feed": ALPACA_DATA_FEED,
         "scan_interval_seconds": SCAN_INTERVAL_SECONDS,
-        "position_monitor_interval_seconds": POSITION_MONITOR_INTERVAL_SECONDS,
-        "trade_manager_interval_seconds": TRADE_MANAGER_INTERVAL_SECONDS,
+        # Both of these used to publish their own constants. They named a
+        # per-module cadence that has never existed: everything runs in one
+        # controller cycle on SCAN_INTERVAL_SECONDS. Reporting the real
+        # number rather than deleting the keys, so any reader that expects
+        # them keeps working and now gets the truth.
+        "position_monitor_interval_seconds": SCAN_INTERVAL_SECONDS,
+        "trade_manager_interval_seconds": SCAN_INTERVAL_SECONDS,
         "max_open_positions": MAX_OPEN_POSITIONS,
         "max_same_direction_positions": MAX_SAME_DIRECTION_POSITIONS,
         "max_new_entries_per_cycle": MAX_NEW_ENTRIES_PER_CYCLE,

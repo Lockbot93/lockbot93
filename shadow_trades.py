@@ -24,8 +24,34 @@ HONEST LIMITS
     Resolution uses 5-minute bars. When a single bar's high and low span both
     the stop and the target, there's no way to know which came first — those
     are marked AMBIGUOUS and counted as losses, which is the pessimistic
-    reading. Fills are assumed at the exact stop or target price, so real
-    slippage would make these results slightly worse than they look.
+    reading. The report prints the ambiguous-excluded rate beside it so the
+    assumption is visible rather than buried; today they are the same number,
+    because zero rows in 427 are ambiguous. Fills are assumed at the exact
+    stop or target price, so real slippage would make these results slightly
+    worse than they look.
+
+WHY EXPIRED EXISTS (2026-08-10)
+    A setup whose window ran out without touching either band was written
+    back as UNRESOLVED with a fresh resolved_at. Two things followed, and
+    both were invisible.
+
+    rows_needing_resolution accepts UNRESOLVED, so every aged-out row was
+    re-queued and re-fetched on every run, forever — 59 of them by the time
+    it was found, against a 10-day window that had long since closed.
+
+    Worse, they were censored rather than excluded. The decided sample is
+    whatever touched a band inside 10 days, which is the FAST movers; the
+    setups that went nowhere simply left the statistics. That biases the
+    win rate on a sample already known to be thin.
+
+    EXPIRED is terminal, so the re-fetch stops, and it carries a
+    mark-to-market R so the slow population is visible. It is deliberately
+    NOT counted in the win rate — a target-touch rate must keep meaning a
+    target-touch rate — and appears instead as a separate ALL-IN line.
+
+    The mark is None, never 0.0, when it cannot be computed. `simulate_symbol`
+    once left timed-out trades at an r_multiple of 0.0 and thereby claimed
+    they broke even; a default value is a claim.
 """
 
 from __future__ import annotations
@@ -39,6 +65,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
+
+# One owner for CSV header migration across every journal. See its
+# docstring for why this is not solved inside each writer.
+import csv_schema
 
 try:
     from dotenv import load_dotenv
@@ -60,6 +90,81 @@ def _cfg(name, default):
 
 PROJECT_FOLDER = Path(__file__).resolve().parent
 SHADOW_FILE = Path(_cfg("SHADOW_TRADES_FILE", PROJECT_FOLDER / "shadow_trades.csv"))
+
+# --------------------------------------------------------------------------
+# Which POOL produced a setup
+# --------------------------------------------------------------------------
+#
+# LOCKBOT's ruling of 2026-08-08, made a hard precondition of the
+# broad-market expansion (c6812f3a) and binding on any change to the scan
+# population: every shadow row must carry a pool-generation field BEFORE a
+# new pool goes live, so pre- and post-change populations are segmented and
+# never pooled in a win-rate statistic. Shipping a pool change without the
+# tag contaminates the only forward measurement this project has.
+#
+# WHY IT IS DERIVED AND NOT A CONSTANT SOMEONE BUMPS
+#
+# A hand-maintained generation number is a thing to forget, and this
+# project's failure mode is precisely the switch that reads as configuration
+# while controlling nothing. So the generation is a fingerprint of the RULES
+# that define the pool. Change a threshold and the generation changes by
+# itself; change nothing and it stays put. It is impossible to widen the
+# universe without the rows recording that you did.
+#
+# The fingerprint covers the pool DEFINITION, not the resulting symbols.
+# universe.csv churns daily as names cross the liquidity line, and a
+# content hash would mint a new generation every morning, which is the
+# opposite of useful.
+POOL_RULE_KEYS = (
+    "UNIVERSE_MIN_PRICE",
+    "UNIVERSE_MAX_PRICE",
+    "UNIVERSE_MIN_ATR_PERCENT",
+    "UNIVERSE_MAX_ATR_PERCENT",
+    "UNIVERSE_MIN_AVG_DOLLAR_VOLUME",
+    "UNIVERSE_TOP_N",
+    "MAX_SCAN_SYMBOLS",
+    "UNIVERSE_ALLOWED_EXCHANGES",
+    "UNIVERSE_OPTIONABLE_ONLY",      # absent today; appears when it ships
+)
+
+
+def pool_rules() -> dict:
+    """The live values of every constant that defines the scan pool."""
+
+    out = {}
+
+    for key in POOL_RULE_KEYS:
+        value = _cfg(key, None)
+        if value is None:
+            continue
+        out[key] = list(value) if isinstance(value, (list, tuple)) else value
+
+    return out
+
+
+def pool_generation(rules: Optional[dict] = None) -> str:
+    """Short stable fingerprint of the pool definition.
+
+    Same rules -> same string, across machines and runs. Different rules ->
+    different string, with no human in the loop.
+    """
+
+    import hashlib
+    import json
+
+    payload = json.dumps(pool_rules() if rules is None else rules,
+                         sort_keys=True, separators=(",", ":"))
+
+    return "pool_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def describe_pool(rules: Optional[dict] = None) -> str:
+    """Human-readable pool description, so a future reader knows WHAT
+    changed rather than only that something did."""
+
+    live = pool_rules() if rules is None else rules
+
+    return "; ".join(f"{k}={live[k]}" for k in sorted(live))
 
 # How long a shadow trade gets to reach a level before it's called unresolved.
 #
@@ -128,7 +233,16 @@ COLUMNS = [
     "mfe_r",               # best excursion for, in R (>= 0)
     "bars_to_mfe_peak",
     "post_stop_recovered",
+    # Which POOL produced this setup, added 2026-08-12. See the note beside
+    # POOL_RULE_KEYS. Rows written before it carry blanks, which is itself
+    # the legacy generation and is reported as such rather than merged into
+    # whatever the pool happens to be today.
+    "pool_generation",
 ]
+
+# Rows predating the tag. Named rather than left as "" so the report can
+# say what it is instead of showing an empty cell.
+POOL_LEGACY = "pool_untagged"
 
 OUTCOME_PENDING = "PENDING"
 OUTCOME_TARGET = "TARGET"
@@ -137,15 +251,42 @@ OUTCOME_AMBIGUOUS = "AMBIGUOUS"
 OUTCOME_UNRESOLVED = "UNRESOLVED"
 OUTCOME_NO_DATA = "NO_DATA"
 
+# A setup whose SHADOW_MAX_DAYS window ran out without touching either
+# band. UNRESOLVED means "not decided YET"; EXPIRED means "never will
+# be". They were the same string until 2026-08-10, which cost twice:
+# rows_needing_resolution re-queued every aged-out row on every run, and
+# the aged-out population was censored from every statistic rather than
+# merely excluded from the win rate.
+OUTCOME_EXPIRED = "EXPIRED"
+
 
 # --------------------------------------------------------------------------
 # Recording (called by market_scanner.py)
 # --------------------------------------------------------------------------
 
-def ensure_file(path: Path = SHADOW_FILE) -> None:
-    if not path.exists() or path.stat().st_size == 0:
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            csv.DictWriter(handle, fieldnames=COLUMNS).writeheader()
+def ensure_file(path: Path = SHADOW_FILE) -> List[str]:
+    """Make the file safe to write, and RETURN THE HEADER to write against.
+
+    Delegates to csv_schema, which owns this for every journal in the
+    project. Converted 2026-08-13 on LOCKBOT's ruling, after it found a
+    live hole in the hand-rolled version this replaced.
+
+    THE HOLE, kept on record because the comment that caused it read as
+    prudence: the old code computed `missing = [c for c in COLUMNS if c
+    not in existing]` and returned early when nothing was missing, with
+    the comment "reordered or extra: leave alone". A WIDER header -- one
+    written by NEWER code -- produces no missing columns, so it took that
+    branch, left the header alone, and let record_candidates append rows
+    of 26 values under a 27-column header. Demonstrated: the appended row
+    reads back with the newer column as None, silently unpopulated, no
+    exception, file opens fine.
+
+    Identifying the case and choosing to ignore it is how the defect
+    survived. csv_schema REFUSES it instead, because a wider header means
+    the running code is older than the file.
+    """
+
+    return csv_schema.ensure_schema(path, COLUMNS, verbose=True)
 
 
 def record_candidates(candidates: List[dict], path: Path = SHADOW_FILE) -> int:
@@ -161,10 +302,18 @@ def record_candidates(candidates: List[dict], path: Path = SHADOW_FILE) -> int:
         return 0
 
     try:
-        ensure_file(path)
+        # Write against the header csv_schema VERIFIED ON DISK, never
+        # against COLUMNS. That mismatch is the root of all three
+        # occurrences of the askew-write bug.
+        header = ensure_file(path)
+
+        # Computed once per cycle, not per row: it is a property of the
+        # pool definition, and every setup in one scan came from the same
+        # pool by construction.
+        generation = pool_generation()
 
         with path.open("a", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=COLUMNS)
+            writer = csv.DictWriter(handle, fieldnames=header)
 
             for candidate in candidates:
                 logged_at = candidate.get("logged_at")
@@ -188,6 +337,7 @@ def record_candidates(candidates: List[dict], path: Path = SHADOW_FILE) -> int:
                     "bars_checked": "",
                     "r_multiple": "",
                     "quality": candidate.get("quality", ""),
+                    "pool_generation": generation,
                     **{
                         f"q_{name}": round(float(value), 4)
                         for name, value in (
@@ -219,6 +369,52 @@ class Resolution:
     mfe_r: Optional[float] = None
     bars_to_mfe_peak: Optional[int] = None
     post_stop_recovered: Optional[bool] = None
+
+    # The last close seen inside the window, so an expiring row can be
+    # marked to market instead of vanishing. None when no bar carried
+    # one -- absent, not zero.
+    last_close: Optional[float] = None
+
+
+def mark_to_market_r(
+    *,
+    entry_price: Optional[float],
+    stop_price: Optional[float],
+    last_close: Optional[float],
+    side: str,
+) -> Optional[float]:
+    """
+    What a setup was worth in R when its window ran out.
+
+    Timeouts have been booked wrong in this project once already: in
+    `simulate_symbol` an unclosed trade kept `r_multiple` at its 0.0
+    default, so a position that ended wherever price happened to be was
+    recorded as having made exactly nothing. A default value is a claim.
+
+    So this returns None -- not 0.0 -- whenever the mark cannot be
+    computed. The caller writes an empty cell, and an unmeasurable
+    outcome stays unmeasured rather than becoming a breakeven one.
+    """
+
+    try:
+        entry = float(entry_price) if entry_price else None
+        stop = float(stop_price) if stop_price is not None else None
+        close = float(last_close) if last_close is not None else None
+    except (TypeError, ValueError):
+        return None
+
+    if not entry or stop is None or close is None:
+        return None
+
+    risk = abs(entry - stop)
+
+    if not risk:
+        return None
+
+    is_long = str(side).upper() in {"LONG", "BUY_LONG", "BUY"}
+    move = (close - entry) if is_long else (entry - close)
+
+    return round(move / risk, 4)
 
 
 def resolve_from_bars(
@@ -266,6 +462,7 @@ def resolve_from_bars(
     best = worst = None
     bars_to_peak = 0
     recovered = None
+    last_close = None
 
     for bar in bars:
         bar_time = getattr(bar, "timestamp", None)
@@ -280,6 +477,14 @@ def resolve_from_bars(
             continue
 
         checked += 1
+
+        bar_close = getattr(bar, "close", None)
+
+        if bar_close is not None:
+            try:
+                last_close = float(bar_close)
+            except (TypeError, ValueError):
+                pass
 
         # ---- excursions, measured on every bar in the window
         if risk:
@@ -329,6 +534,7 @@ def resolve_from_bars(
         "mfe_r": round(best / risk, 4) if risk and best is not None else None,
         "bars_to_mfe_peak": bars_to_peak if risk and best is not None else None,
         "post_stop_recovered": recovered,
+        "last_close": last_close,
     }
 
     if outcome is not None:
@@ -345,11 +551,26 @@ def load_rows(path: Path = SHADOW_FILE) -> List[dict]:
 
 
 def save_rows(rows: List[dict], path: Path = SHADOW_FILE) -> None:
+    """Rewrite the whole book. THE RESOLVER'S WRITER, and the second hole.
+
+    LOCKBOT flagged this one on 2026-08-13: it rewrites with `fieldnames=
+    COLUMNS`, so against a WIDER header -- a file touched by newer code --
+    it would silently DELETE the surplus columns and every value in them.
+    A full rewrite is more destructive than a bad append, not less.
+
+    So it gates on the same check. If csv_schema refuses, nothing is
+    written and the exception propagates: the resolver is an offline
+    batch job, and stopping it is the correct response to a file this
+    code version cannot safely own.
+    """
+
+    header = csv_schema.ensure_schema(path, COLUMNS, verbose=False)
+
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=COLUMNS)
+        writer = csv.DictWriter(handle, fieldnames=header)
         writer.writeheader()
         for row in rows:
-            writer.writerow({column: row.get(column, "") for column in COLUMNS})
+            writer.writerow({column: row.get(column, "") for column in header})
 
 
 def parse_time(value: str) -> Optional[datetime]:
@@ -476,10 +697,26 @@ def resolve_pending(path: Path = SHADOW_FILE, bar_fetcher=fetch_bars_for) -> int
             row["bars_checked"] = resolution.bars_checked
             continue
 
-        row["outcome"] = resolution.outcome
+        outcome = resolution.outcome
+        r_multiple = resolution.r_multiple
+
+        # Out of window and still undecided: it never will be. Give it a
+        # terminal outcome so it stops being re-fetched every run, and
+        # mark it to market so the population that goes nowhere is
+        # visible rather than silently dropped.
+        if outcome == OUTCOME_UNRESOLVED:
+            outcome = OUTCOME_EXPIRED
+            r_multiple = mark_to_market_r(
+                entry_price=entry_price,
+                stop_price=float(row["stop_price"]),
+                last_close=resolution.last_close,
+                side=row["side"],
+            )
+
+        row["outcome"] = outcome
         row["bars_checked"] = resolution.bars_checked
         row["resolved_at"] = now.isoformat()
-        row["r_multiple"] = "" if resolution.r_multiple is None else resolution.r_multiple
+        row["r_multiple"] = "" if r_multiple is None else r_multiple
 
         # The anatomy. Blank rather than a guess when it could not be
         # measured -- an absent excursion must not read as a zero one.
@@ -516,6 +753,41 @@ def _summarize(rows: List[dict]) -> dict:
         "wins": wins,
         "win_rate": wins / len(decided),
         "avg_r": total_r / len(decided),
+    }
+
+
+def win_rates(rows: List[dict]) -> dict:
+    """
+    The win rate both ways, because one number hides a judgement call.
+
+    An AMBIGUOUS bar spans stop and target, so 5-minute data cannot say
+    which came first and it is booked as a loss. That is the pessimistic
+    reading and it stays the headline -- every figure on record, and
+    every regime split in the notes, is computed that way.
+
+    Excluding ambiguity instead would be the optimistic reading, and
+    silently switching to it would shift every historical comparison at
+    once. So both are reported and neither is hidden: the pair bounds
+    the true rate rather than point-estimating it.
+
+    In practice this currently changes nothing -- there are zero
+    ambiguous rows in 427, because at ~4.5% stops and ~9% targets a
+    single bar would need a ~13.5% range. It is reported so that if the
+    bracket ever narrows, the assumption is visible rather than buried.
+    """
+
+    decided = [r for r in rows
+               if r["outcome"] in {OUTCOME_TARGET, OUTCOME_STOP, OUTCOME_AMBIGUOUS}]
+    wins = sum(1 for r in decided if r["outcome"] == OUTCOME_TARGET)
+    ambiguous = sum(1 for r in decided if r["outcome"] == OUTCOME_AMBIGUOUS)
+    unambiguous = len(decided) - ambiguous
+
+    return {
+        "decided": len(decided),
+        "wins": wins,
+        "ambiguous": ambiguous,
+        "win_rate": wins / len(decided) if decided else 0.0,
+        "win_rate_ex_ambiguous": wins / unambiguous if unambiguous else 0.0,
     }
 
 
@@ -558,6 +830,76 @@ def report(path: Path = SHADOW_FILE) -> None:
     if not decided:
         print("\nNothing has resolved yet. Run again after a few sessions.")
         return
+
+    # ---- POOL SEGMENTATION, before any headline number is printed.
+    #
+    # A win rate spanning two pool definitions is a number about neither of
+    # them. This prints the split first and refuses to lead with a pooled
+    # figure whenever more than one generation is present.
+    by_pool: Dict[str, List[dict]] = {}
+    for row in decided:
+        by_pool.setdefault(row.get("pool_generation") or POOL_LEGACY, []).append(row)
+
+    print("\nWhich pool produced these setups")
+    print("-" * 62)
+    print(f"  current pool definition: {pool_generation()}")
+    print(f"  {describe_pool()}")
+    print()
+    for name, group in sorted(by_pool.items(), key=lambda kv: -len(kv[1])):
+        stats = _summarize(group)
+        label = name + ("  (predates the tag)" if name == POOL_LEGACY else "")
+        if stats["count"] >= 5:
+            print(f"  {label:<34} {stats['count']:>4} decided   "
+                  f"win rate {stats['win_rate'] * 100:>5.1f}%   "
+                  f"avg R {stats['avg_r']:>+5.2f}")
+        else:
+            print(f"  {label:<34} {stats['count']:>4} decided   (too few to read)")
+
+    if len(by_pool) > 1:
+        print()
+        print("  MORE THAN ONE POOL IS PRESENT. The figures below span all of")
+        print("  them and are NOT a statement about any single pool. Read the")
+        print("  per-pool lines above instead; the scan population changed,")
+        print("  and a win rate across a population change measures the")
+        print("  change as much as the strategy.")
+
+    rates = win_rates(decided)
+
+    print("\nHeadline")
+    print("-" * 62)
+    print(f"  decided setups       : {rates['decided']}")
+    print(f"  win rate             : {rates['win_rate'] * 100:.1f}%"
+          f"   (ambiguous counted as losses)")
+
+    if rates["ambiguous"]:
+        print(f"  win rate excl. ambig : "
+              f"{rates['win_rate_ex_ambiguous'] * 100:.1f}%"
+              f"   ({rates['ambiguous']} ambiguous excluded)")
+    else:
+        print("  win rate excl. ambig : same — no ambiguous bars on record")
+
+    # The setups that went nowhere. Kept OUT of the win rate, because a
+    # target-touch rate must keep meaning target-touch rate -- but shown,
+    # because they are exactly the slow movers the decided sample drops,
+    # and their absence is what makes that sample fast-mover-enriched.
+    expired = [r for r in rows if r["outcome"] == OUTCOME_EXPIRED]
+
+    if expired:
+        marked = [float(r["r_multiple"]) for r in expired
+                  if r.get("r_multiple") not in {"", None}]
+        decided_r = [float(r["r_multiple"]) for r in decided
+                     if r.get("r_multiple") not in {"", None}]
+
+        print(f"  expired (no touch)   : {len(expired)}"
+              f"   — excluded from the win rate above")
+
+        if marked:
+            print(f"  their avg R at mark  : {sum(marked) / len(marked):+.2f}"
+                  f"   ({len(marked)} of {len(expired)} markable)")
+
+            all_in = decided_r + marked
+            print(f"  ALL-IN avg R         : {sum(all_in) / len(all_in):+.2f}"
+                  f"   (decided + expired at mark, {len(all_in)} setups)")
 
     taken = [r for r in decided if str(r["taken"]).lower() == "true"]
     passed = [r for r in decided if str(r["taken"]).lower() != "true"]
@@ -616,10 +958,13 @@ def report(path: Path = SHADOW_FILE) -> None:
 # --------------------------------------------------------------------------
 
 class _Bar:
-    def __init__(self, timestamp, high, low):
+    def __init__(self, timestamp, high, low, close=None):
         self.timestamp = timestamp
         self.high = high
         self.low = low
+        # Real Alpaca bars always carry a close; the older tests predate
+        # it being needed, so it stays optional.
+        self.close = close
 
 
 def _self_test() -> int:
@@ -729,6 +1074,200 @@ def _self_test() -> int:
     check("the new columns are in the schema",
           {"mae_r", "mfe_r", "bars_to_mfe_peak",
            "post_stop_recovered"} <= set(COLUMNS))
+
+    # ---- expiry, 2c
+    #
+    # A row past SHADOW_MAX_DAYS used to be written back as UNRESOLVED
+    # with a fresh resolved_at, so rows_needing_resolution picked it up
+    # again on every run -- 59 rows re-fetched forever and censored from
+    # every statistic. It gets a terminal outcome now.
+    print("Pool generation: derived from the rules, not remembered")
+    base = {"UNIVERSE_MIN_PRICE": 5.0, "UNIVERSE_MAX_PRICE": 50.0,
+            "UNIVERSE_MIN_ATR_PERCENT": 0.0125}
+    check("the same rules give the same generation",
+          pool_generation(base) == pool_generation(dict(base)))
+    check("key order does not change it",
+          pool_generation({"b": 2, "a": 1}) == pool_generation({"a": 1, "b": 2}))
+    check("widening the price band changes it",
+          pool_generation(base)
+          != pool_generation(dict(base, UNIVERSE_MAX_PRICE=2000.0)))
+    check("dropping the volatility band changes it",
+          pool_generation(base)
+          != pool_generation({k: v for k, v in base.items()
+                              if k != "UNIVERSE_MIN_ATR_PERCENT"}))
+    check("adding an optionable-only rule changes it",
+          pool_generation(base)
+          != pool_generation(dict(base, UNIVERSE_OPTIONABLE_ONLY=True)))
+    check("the generation is short and readable",
+          pool_generation(base).startswith("pool_")
+          and len(pool_generation(base)) == 13)
+    check("the live pool has a generation",
+          pool_generation().startswith("pool_"))
+    check("and a human-readable description of WHAT it is",
+          "UNIVERSE_MAX_PRICE" in describe_pool())
+    check("the column is in the schema", "pool_generation" in COLUMNS)
+    check("untagged rows are named, not left as an empty cell",
+          POOL_LEGACY == "pool_untagged")
+
+    # The silent one: appending 26 fields under a 25-column header.
+    migrate = Path(tempfile.gettempdir()) / "shadow_migrate_selftest.csv"
+    migrate.unlink(missing_ok=True)
+    old_columns = [c for c in COLUMNS if c != "pool_generation"]
+    with migrate.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=old_columns)
+        writer.writeheader()
+        writer.writerow({c: "" for c in old_columns} | {
+            "shadow_id": "OLD", "symbol": "AAA", "side": "LONG",
+            "outcome": OUTCOME_STOP, "r_multiple": -1.0})
+
+    # ---- THE WIDER-HEADER REFUSAL, requested by LOCKBOT before
+    # options_scanner is converted. This is the case the hand-rolled
+    # ensure_file waved through: a file written by NEWER code, where
+    # nothing is "missing" so the early return fired and rows were then
+    # appended short under a wide header.
+    newer = Path(tempfile.gettempdir()) / "shadow_wider_selftest.csv"
+    newer.unlink(missing_ok=True)
+    wider_cols = list(COLUMNS) + ["written_by_newer_code"]
+    with newer.open("w", newline="", encoding="utf-8") as handle:
+        w = csv.DictWriter(handle, fieldnames=wider_cols)
+        w.writeheader()
+        w.writerow({c: "" for c in wider_cols} | {
+            "shadow_id": "NEWER", "outcome": OUTCOME_STOP,
+            "written_by_newer_code": "KEEP ME"})
+    before_bytes = newer.read_bytes()
+
+    refused = False
+    try:
+        ensure_file(newer)
+    except csv_schema.SchemaRefused:
+        refused = True
+    check("a WIDER header is refused, not waved through", refused)
+    check("and the file is left byte-identical", newer.read_bytes() == before_bytes)
+
+    refused_write = False
+    try:
+        save_rows([{"shadow_id": "X"}], newer)
+    except csv_schema.SchemaRefused:
+        refused_write = True
+    check("save_rows refuses it too, rather than deleting the surplus column",
+          refused_write)
+    check("the newer column's value survives both attempts",
+          "KEEP ME" in newer.read_text(encoding="utf-8"))
+
+    check("record_candidates writes nothing to a refused file",
+          record_candidates([{
+              "logged_at": start, "symbol": "NOPE", "side": "LONG",
+              "confidence": 100, "volume_ratio": 1.0, "regime": "T",
+              "reference_price": 100, "stop_price": 98, "target_price": 104,
+              "taken": False}], newer) == 0)
+    check("so the refused file still holds exactly its one original row",
+          len(csv_schema.read_rows(newer)) == 1)
+    newer.unlink(missing_ok=True)
+
+    ensure_file(migrate)
+    migrated = load_rows(migrate)
+    check("an older file gains the new column on contact",
+          "pool_generation" in migrated[0])
+    check("and its existing row is backfilled blank, never guessed",
+          migrated[0]["pool_generation"] == "")
+    check("while its recorded verdict is untouched",
+          migrated[0]["outcome"] == OUTCOME_STOP
+          and migrated[0]["shadow_id"] == "OLD")
+
+    record_candidates([{
+        "logged_at": start, "symbol": "NEW", "side": "LONG", "confidence": 100,
+        "volume_ratio": 1.5, "regime": "TRENDING", "reference_price": 100,
+        "stop_price": 98, "target_price": 104, "taken": False,
+    }], migrate)
+    after = load_rows(migrate)
+    check("a row appended after migration is readable, not shifted",
+          len(after) == 2 and after[1]["symbol"] == "NEW")
+    check("and carries the live pool generation",
+          after[1]["pool_generation"] == pool_generation())
+    check("the old row still reads back correctly beside it",
+          after[0]["shadow_id"] == "OLD" and after[0]["outcome"] == OUTCOME_STOP)
+    migrate.unlink(missing_ok=True)
+
+    print("Expiry: a window that ran out is EXPIRED, not UNRESOLVED")
+
+    try:
+        # Entry 100, stop 98 -> 1R is $2. Last close 101 is +0.5R.
+        window = [
+            _Bar(start + timedelta(minutes=5), 101, 99, close=100.5),
+            _Bar(start + timedelta(minutes=10), 102, 100, close=101.0),
+        ]
+        undecided = resolve_from_bars(window, "LONG", 98, 104, start,
+                                      entry_price=100)
+
+        check("an undecided window still reports UNRESOLVED",
+              undecided.outcome == OUTCOME_UNRESOLVED)
+        check("but it now carries the last close for marking to market",
+              undecided.last_close == 101.0)
+
+        check("mark to market is measured in R (long)",
+              abs(mark_to_market_r(entry_price=100, stop_price=98,
+                                   last_close=101, side="LONG") - 0.5) < 1e-9)
+        check("mark to market is measured in R (short)",
+              abs(mark_to_market_r(entry_price=100, stop_price=102,
+                                   last_close=99, side="SHORT") - 0.5) < 1e-9)
+        check("a losing mark to market is negative",
+              mark_to_market_r(entry_price=100, stop_price=98,
+                               last_close=99, side="LONG") < 0)
+        check("no close means no mark to market, not a zero one",
+              mark_to_market_r(entry_price=100, stop_price=98,
+                               last_close=None, side="LONG") is None)
+        check("no entry price means no mark to market either",
+              mark_to_market_r(entry_price=None, stop_price=98,
+                               last_close=101, side="LONG") is None)
+
+        expiry_file = Path(tempfile.gettempdir()) / "shadow_expiry_selftest.csv"
+        expiry_file.unlink(missing_ok=True)
+
+        stale = datetime.now(timezone.utc) - timedelta(days=SHADOW_MAX_DAYS + 2)
+        record_candidates([
+            {"logged_at": stale, "symbol": "OLD", "side": "LONG",
+             "confidence": 100, "volume_ratio": 1.5, "regime": "TRENDING",
+             "reference_price": 100, "stop_price": 98, "target_price": 104,
+             "taken": False},
+        ], expiry_file)
+
+        def _never_touches(symbols, begin, finish):
+            return {"OLD": [
+                _Bar(stale + timedelta(minutes=5), 101, 99, close=100.5),
+                _Bar(stale + timedelta(minutes=10), 102, 100, close=101.0),
+            ]}
+
+        resolve_pending(expiry_file, bar_fetcher=_never_touches)
+        aged = load_rows(expiry_file)
+
+        check("a row past its window is EXPIRED",
+              aged[0]["outcome"] == OUTCOME_EXPIRED)
+        check("and is marked to market rather than left blank",
+              abs(float(aged[0]["r_multiple"]) - 0.5) < 1e-9)
+        check("an EXPIRED row is never queued for resolution again",
+              rows_needing_resolution(aged, datetime.now(timezone.utc)) == [])
+
+        check("EXPIRED is not counted as decided",
+              _summarize(aged)["count"] == 0)
+
+        mixed = [
+            {"outcome": OUTCOME_TARGET, "r_multiple": 2.0},
+            {"outcome": OUTCOME_TARGET, "r_multiple": 2.0},
+            {"outcome": OUTCOME_STOP, "r_multiple": -1.0},
+            {"outcome": OUTCOME_AMBIGUOUS, "r_multiple": -1.0},
+        ]
+        rates = win_rates(mixed)
+        check("headline win rate still counts ambiguous as a loss",
+              abs(rates["win_rate"] - 0.5) < 1e-9)
+        check("and an ambiguous-excluded rate is reported beside it",
+              abs(rates["win_rate_ex_ambiguous"] - (2 / 3)) < 1e-9)
+        check("with the ambiguous count named",
+              rates["ambiguous"] == 1)
+
+        expiry_file.unlink(missing_ok=True)
+    except NameError as error:
+        failures.append(f"expiry machinery missing: {error}")
+        print(f"  FAIL  expiry machinery missing: {error}")
 
     print("File round trip:")
     temp = Path(tempfile.gettempdir()) / "shadow_selftest.csv"

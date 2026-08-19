@@ -847,6 +847,27 @@ def synchronize_completed_trades(
                 paper_trade=_parse_boolean(
                     row["paper_trade"]
                 ),
+                # The horizon was captured at ENTRY and carried in the
+                # pending row all along; this call simply never passed it
+                # on, so record_completed_trade fell back to its
+                # "unknown" default and every finished trade was
+                # journaled untagged.
+                #
+                # Found 2026-08-14 on the first two trades this account
+                # completed: lockbot_pending_trades.csv held "overnight"
+                # for T and "swing" for IEMG, and both landed in
+                # completed_trades.csv as "unknown".
+                #
+                # That is the worst possible place to drop it. The column
+                # exists to allow per-horizon comparison, and a trade is
+                # only comparable once it has finished -- so the tag was
+                # preserved for exactly as long as it was useless and
+                # discarded the moment it mattered. The default did its
+                # job (it refused to guess "day"); nothing supplied the
+                # real value.
+                horizon=trade_horizon.normalise(
+                    row.get("horizon") or trade_horizon.UNKNOWN
+                ),
             )
 
             journal_trade_ids.add(trade_id)
