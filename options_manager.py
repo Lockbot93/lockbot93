@@ -649,6 +649,17 @@ WORKING_ORDER_STATUSES = {
 
 FILLED_ORDER_STATUSES = {"filled"}
 
+# The only statuses that mean "this order ended and bought nothing".
+# Anything not here is treated as still working -- see classify_entry_order
+# for why that direction is the safe one.
+TERMINAL_WITHOUT_FILL = {
+    "canceled",
+    "cancelled",
+    "expired",
+    "rejected",
+    "done_for_day",
+}
+
 
 def _order_status_text(order: Any) -> str:
     """Order status as a plain lowercase string, enum or not."""
@@ -687,18 +698,41 @@ def classify_entry_order(trading_client: Any, position: OptionPosition) -> str:
     if status in FILLED_ORDER_STATUSES:
         return "FILLED"
 
-    if status in WORKING_ORDER_STATUSES:
-        # A partial fill is a real position, not a working order, once any
-        # quantity has been bought.
-        try:
-            if float(order.filled_qty or 0) > 0:
-                return "FILLED"
-        except (TypeError, ValueError):
-            pass
+    # A partial fill is a real position, not a working order, once any
+    # quantity has been bought.
+    try:
+        if float(order.filled_qty or 0) > 0:
+            return "FILLED"
+    except (TypeError, ValueError):
+        pass
 
-        return "WORKING"
+    # DEAD is asserted ONLY for statuses that are terminal without a fill.
+    # Everything else -- known-working, or a status this code has never
+    # seen -- is WORKING, and holds its slot.
+    #
+    # This was the other way round until 2026-08-19: WORKING_ORDER_STATUSES
+    # was an allowlist and anything absent from it fell through to DEAD.
+    # Nine of Alpaca's statuses were missing, and five of those are not
+    # terminal at all (calculated, pending_review, pending_cancel, stopped,
+    # suspended).
+    #
+    # It cost a live position. The XLF 58/58.5 spread was submitted at
+    # 14:25:38 on 2026-08-19; at 14:30:24 this returned DEAD on an
+    # unrecognised status, journaled it ENTRY_NOT_FILLED at zero P&L, and
+    # deleted it from state. The order then FILLED at 14:32:57. The result
+    # was a real position at the broker that nothing tracked -- and with no
+    # broker-side stop on options, an untracked position has no stop at all.
+    # That is the PBR failure of 2026-07-30 in a mirror: there an unfilled
+    # order was journaled as a loss, here a filled one was journaled as
+    # nothing.
+    #
+    # The asymmetry decides the direction. Wrongly holding a slot costs one
+    # slot until the timeout clears it. Wrongly releasing one costs an
+    # unprotected live position. An unknown status is not evidence of death.
+    if status in TERMINAL_WITHOUT_FILL:
+        return "DEAD"
 
-    return "DEAD"
+    return "WORKING"
 
 
 def net_fill_dollars(order: Any) -> float | None:
@@ -2034,6 +2068,56 @@ def _self_test() -> int:
 
         finally:
             config.OPTIONS_RISK_STATE_FILE = real_path
+
+    print()
+    print("An unknown order status is not evidence of death")
+
+    class _Order:
+        def __init__(self, status, filled_qty=0):
+            self.status = status
+            self.filled_qty = filled_qty
+
+    class _Client:
+        def __init__(self, order):
+            self._order = order
+        def get_order_by_id(self, _id):
+            return self._order
+
+    def _verdict(status, filled_qty=0):
+        pos = OptionPosition(
+            position_id="t", underlying="TEST", strategy="LONG_CALL",
+            long_symbol="TEST260101C00010000", contracts=1, entry_debit=50.0,
+            entry_time="2026-08-19T14:25:38+00:00", expiration="2026-09-11",
+            entry_order_id="abc",
+        )
+        return classify_entry_order(_Client(_Order(status, filled_qty)), pos)
+
+    # The 2026-08-19 XLF case: submitted 14:25:38, called DEAD at 14:30:24
+    # on an unrecognised status, filled 14:32:57.
+    for status in ("pending_review", "calculated", "suspended", "stopped",
+                   "pending_cancel"):
+        check(f"{status} holds its slot rather than being buried",
+              _verdict(status) == "WORKING", _verdict(status))
+
+    for status in ("canceled", "expired", "rejected", "done_for_day"):
+        check(f"{status} is correctly DEAD", _verdict(status) == "DEAD",
+              _verdict(status))
+
+    check("filled is FILLED", _verdict("filled") == "FILLED")
+    check("a status nobody has ever seen holds its slot",
+          _verdict("some_future_alpaca_status") == "WORKING")
+    check("a partial fill is a real position, whatever the status says",
+          _verdict("pending_cancel", filled_qty=1) == "FILLED")
+    check("no order id is still UNKNOWN, not DEAD",
+          classify_entry_order(_Client(_Order("filled")),
+                               OptionPosition(
+                                   position_id="t", underlying="TEST",
+                                   strategy="LONG_CALL",
+                                   long_symbol="X", contracts=1,
+                                   entry_debit=1.0,
+                                   entry_time="2026-08-19T00:00:00+00:00",
+                                   expiration="2026-09-11",
+                               )) == "UNKNOWN")
 
     print()
 
