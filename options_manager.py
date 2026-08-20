@@ -807,6 +807,25 @@ def exit_credit_from_order(order: Any) -> float | None:
     return credit if credit >= 0 else None
 
 
+def _entry_order(trading_client: Any, position: OptionPosition) -> Any | None:
+    """Fetch a position's entry order, or None if it cannot be read.
+
+    Small because it exists for one caller: the adopt path needs the order
+    OBJECT to re-derive a fill basis, while classify_entry_order only
+    returns a verdict. Never raises -- a basis we cannot read leaves the
+    quoted debit in place, which is wrong by a little, where dropping the
+    position would be wrong by the whole stop.
+    """
+
+    if not position.entry_order_id:
+        return None
+
+    try:
+        return trading_client.get_order_by_id(position.entry_order_id)
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
 def entry_debit_from_order(order: Any) -> float | None:
     """What opening actually cost, in dollars. Never negative."""
 
@@ -1142,7 +1161,8 @@ def run_options_manager() -> OptionsManagerSummary:
                         trading_client.cancel_order_by_id(position.entry_order_id)
                         print(
                             f"{position.underlying}: entry order unfilled past "
-                            f"the timeout. Cancelled {position.entry_order_id}."
+                            f"the timeout. Cancel requested for "
+                            f"{position.entry_order_id}."
                         )
                     except Exception as cancel_error:
                         summary.errors += 1
@@ -1155,7 +1175,62 @@ def run_options_manager() -> OptionsManagerSummary:
                         )
                         continue
 
-                    verdict = "DEAD"
+                    # A CANCEL REQUEST IS NOT A CANCELLED ORDER.
+                    #
+                    # This used to set verdict = "DEAD" the moment the cancel
+                    # call returned, and book ENTRY_NOT_FILLED on that basis.
+                    # But cancel is a request, not an outcome: it races the
+                    # fill, and the broker decides. If the fill wins, the old
+                    # code had already written a zero-P&L trade and dropped
+                    # the position -- leaving a live spread with no software
+                    # stop, because options have no broker-side stop to fall
+                    # back on.
+                    #
+                    # That is not hypothetical. The XLF 58/58.5 spread on
+                    # 2026-08-19 was abandoned at 14:30:24 and filled at
+                    # 14:32:57, then sat untracked for five and a half hours
+                    # and ran to -72% against a -35% stop. LOCKBOT filed it
+                    # as 50d2f36d; this is its fix.
+                    #
+                    # So: re-read the order and let its ACTUAL status decide.
+                    # A fill that beat the cancel is adopted rather than
+                    # abandoned, and its basis is re-derived from the fill.
+                    verdict = classify_entry_order(trading_client, position)
+
+                    if verdict == "FILLED":
+                        summary.errors += 0
+                        position.entry_filled = True
+
+                        filled = entry_debit_from_order(
+                            _entry_order(trading_client, position)
+                        )
+
+                        if filled is not None and filled > 0:
+                            position.entry_debit = filled
+                            position.highest_value = filled
+
+                        print(
+                            f"{position.underlying}: THE FILL BEAT THE CANCEL. "
+                            f"Adopting it rather than abandoning it -- basis "
+                            f"re-derived from the order at "
+                            f"${position.entry_debit:.2f}. It keeps its slot "
+                            "and its stop."
+                        )
+                        summary.entries_confirmed += 1
+                        continue
+
+                    if verdict == "WORKING":
+                        print(
+                            f"{position.underlying}: cancel requested but the "
+                            "order is still live at the broker. Holding the "
+                            "position tracked until its status is terminal -- "
+                            "an unconfirmed cancel is not a dead order."
+                        )
+                        continue
+
+                    # UNKNOWN falls through with DEAD to the booking path
+                    # below, which is the pre-existing behaviour for an
+                    # order that cannot be read at all.
 
                 if verdict == "DEAD":
                     # No trade happened. Journal it at cost so it stays
@@ -1223,6 +1298,41 @@ def run_options_manager() -> OptionsManagerSummary:
                 f"does not track: {', '.join(summary.untracked)}. These have "
                 "NO software stop loss."
             )
+
+            # This printed into a DEGRADED heartbeat and nothing else, which
+            # is how the XLF spread sat unprotected from 14:32 to 20:00 on
+            # 2026-08-19 with a correct warning written down the whole time.
+            # An untracked option position is the single worst state this
+            # system can be in -- there is no broker-side stop for options,
+            # so nothing at all limits the loss -- and it is the one thing
+            # that must reach a person rather than a log file.
+            #
+            # Keyed on the symbols so a standing orphan alerts once a day
+            # rather than every five minutes, and never suppressed by the
+            # cooldown when the SET of untracked symbols changes.
+            try:
+                from notifications import send_smart_notification
+
+                send_smart_notification(
+                    symbol="OPTIONS",
+                    event_type="UNTRACKED_POSITION",
+                    title="LOCKBOT: option position with NO stop loss",
+                    message=(
+                        f"{len(summary.untracked)} option leg(s) held at the "
+                        f"broker that LOCKBOT does not track:\n"
+                        f"{', '.join(summary.untracked)}\n\n"
+                        "Options have no broker-side stop, so these are "
+                        "unprotected. Nothing will close them."
+                    ),
+                    reason=",".join(summary.untracked),
+                    force=True,
+                    cooldown_minutes=1440,
+                )
+            except Exception as alert_error:           # noqa: BLE001
+                print(
+                    "  and the ALERT about it failed: "
+                    f"{type(alert_error).__name__}: {alert_error}"
+                )
 
         # ---- Price and evaluate what remains
         symbols_to_quote = sorted(tracked_symbols)
@@ -2068,6 +2178,58 @@ def _self_test() -> int:
 
         finally:
             config.OPTIONS_RISK_STATE_FILE = real_path
+
+    print()
+    print("A cancel REQUEST is not a cancelled order")
+
+    # LOCKBOT item 50d2f36d. The XLF spread was abandoned at 14:30:24 on a
+    # cancel that had only been REQUESTED, and filled at 14:32:57.
+    src = Path(__file__).read_text(encoding="utf-8")
+    body = src.split("def _self_test")[0]
+
+    check(
+        "the cancel path re-classifies instead of assuming DEAD",
+        "verdict = classify_entry_order(trading_client, position)" in body,
+    )
+    check(
+        "a fill that beat the cancel is ADOPTED, not booked as unfilled",
+        "THE FILL BEAT THE CANCEL" in body and "entry_filled = True" in body,
+    )
+    check(
+        "an unconfirmed cancel holds the position rather than freeing it",
+        "an unconfirmed cancel is not a dead order" in body,
+    )
+    check(
+        "the adopted basis is re-derived from the ORDER, not the quote",
+        "entry_debit_from_order(" in body and "_entry_order(" in body,
+    )
+    # Comments are stripped first: the fix's own comment quotes the line it
+    # replaced, and a test that cannot tell code from a description of code
+    # would fail on an accurate explanation.
+    code_only = "\n".join(
+        line for line in body.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    check(
+        "verdict is no longer hard-set to DEAD after a cancel call",
+        'verdict = "DEAD"' not in code_only,
+    )
+
+    print()
+    print("An untracked option position must reach a person")
+
+    check(
+        "it pages rather than only printing",
+        "UNTRACKED_POSITION" in body and "send_smart_notification" in body,
+    )
+    check(
+        "the alert says the position is unprotected",
+        "no broker-side stop" in body and "Nothing will close them" in body,
+    )
+    check(
+        "a failed alert is reported, never swallowed silently",
+        "and the ALERT about it failed" in body,
+    )
 
     print()
     print("An unknown order status is not evidence of death")
