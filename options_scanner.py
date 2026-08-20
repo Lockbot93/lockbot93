@@ -613,18 +613,38 @@ def affordable_now(
     )
 
 
-def entry_limit_price(price: float) -> float:
-    """Price an entry limit a small buffer above the quoted ask.
+def entry_limit_price(price: float, mid: float | None = None) -> float:
+    """Where inside the spread an entry limit sits.
 
-    See build_open_request for the two unfilled PBR orders this exists
-    for. A zero buffer restores the old at-the-touch behaviour exactly.
+    `price` is the touch -- the ask for a single leg, the net ask-minus-bid
+    for a spread. `mid` is the midpoint of the same thing. With no mid the
+    old at-the-touch behaviour is reproduced exactly, so every existing
+    caller and test is unchanged.
+
+    OPTIONS_ENTRY_LIMIT_FRACTION interpolates: 0.0 prices at the mid, 1.0 at
+    the touch. LOCKBOT ruled 0.5 on 2026-08-19 (channel 80b8a35f) after the
+    ask x 1.03 design was shown to have produced 4 of 10 ENTRY_NOT_FILLED --
+    it was paying over the offer for a certainty it never had.
+
+    The buffer above the touch survives but applies ONLY at fraction 1.0. It
+    exists so a limit does not rest exactly on a moving touch; anywhere
+    inside the spread there is already cushion, and adding more would simply
+    give back the saving.
     """
 
-    buffer_percent = getattr(
-        config, "OPTIONS_ENTRY_LIMIT_BUFFER_PERCENT", 0.0
-    )
+    fraction = float(getattr(config, "OPTIONS_ENTRY_LIMIT_FRACTION", 1.0))
+    fraction = min(max(fraction, 0.0), 1.0)
 
-    return round(price * (1.0 + buffer_percent), 2)
+    if mid is None or fraction >= 1.0:
+        buffer_percent = getattr(
+            config, "OPTIONS_ENTRY_LIMIT_BUFFER_PERCENT", 0.0
+        )
+        return round(price * (1.0 + buffer_percent), 2)
+
+    # Never below the mid, and never above the touch.
+    limit = mid + fraction * (price - mid)
+
+    return round(max(min(limit, price), mid), 2)
 
 
 def build_open_request(
@@ -1257,10 +1277,16 @@ def run_options_scanner() -> OptionsScannerSummary:
             # the risk cap to the unbuffered quote, so the buffer is
             # re-checked here rather than allowed to slip past it.
             if short_quote is None:
-                limit_per_contract = entry_limit_price(long_quote.ask)
-            else:
                 limit_per_contract = entry_limit_price(
-                    max(long_quote.ask - short_quote.bid, 0.01)
+                    long_quote.ask, mid=long_quote.mid
+                )
+            else:
+                # A spread's touch is long ask minus short bid; its mid is
+                # the difference of the two mids. Both legs give up half a
+                # spread, which is why the saving is roughly doubled here.
+                limit_per_contract = entry_limit_price(
+                    max(long_quote.ask - short_quote.bid, 0.01),
+                    mid=max(long_quote.mid - short_quote.mid, 0.01),
                 )
 
             debit = limit_per_contract * CONTRACT_MULTIPLIER
@@ -1640,6 +1666,18 @@ def run_options_scanner() -> OptionsScannerSummary:
 # Self-test
 # ---------------------------------------------------------------------------
 
+def _price_at(fraction: float, touch: float, mid: float) -> float:
+    """entry_limit_price at a given fraction, for the self-test only."""
+
+    original = getattr(config, "OPTIONS_ENTRY_LIMIT_FRACTION", 1.0)
+    config.OPTIONS_ENTRY_LIMIT_FRACTION = fraction
+
+    try:
+        return entry_limit_price(touch, mid=mid)
+    finally:
+        config.OPTIONS_ENTRY_LIMIT_FRACTION = original
+
+
 def _self_test() -> int:
     """Offline checks. No network, no credentials."""
 
@@ -1871,6 +1909,38 @@ def _self_test() -> int:
     # same scan would otherwise both submit.
     engaged.add("EWZ")
     check("claiming inside the cycle blocks the second", "EWZ" in engaged)
+
+    print()
+    print("Entries price inside the spread, not over the offer")
+
+    _f = config.OPTIONS_ENTRY_LIMIT_FRACTION
+
+    # A contract quoted 0.30 / 0.34: mid 0.32, touch 0.34.
+    priced = entry_limit_price(0.34, mid=0.32)
+    check(f"at fraction {_f} a 0.30/0.34 book prices at 0.33, not 0.35",
+          priced == 0.33, str(priced))
+    check("which is BELOW the offer, where the old design was above it",
+          priced < 0.34 * 1.03)
+
+    check("fraction 0.0 would price at the mid",
+          _price_at(0.0, 0.34, 0.32) == 0.32, str(_price_at(0.0, 0.34, 0.32)))
+    check("fraction 1.0 restores the touch-plus-buffer exactly",
+          _price_at(1.0, 0.34, 0.32) == round(0.34 * 1.03, 2))
+
+    check("it never prices below the mid",
+          _price_at(-5.0, 0.34, 0.32) >= 0.32)
+    check("and never above the touch, whatever the fraction says",
+          _price_at(0.99, 0.34, 0.32) <= 0.34)
+
+    check("no mid supplied reproduces the old behaviour exactly",
+          entry_limit_price(0.34) == round(0.34 * 1.03, 2))
+
+    # The saving, on the book LOCKBOT actually sees. Median spread on
+    # 2026-08-19 was 11.2%.
+    wide_touch, wide_mid = 1.06, 1.00
+    saved = round(wide_touch * 1.03 - _price_at(0.5, wide_touch, wide_mid), 4)
+    check(f"on an 11%-wide book it saves about {saved:.2f} per share per leg",
+          saved > 0.05, f"{saved}")
 
     print()
     print("No entry path may size the cap on the software stop")

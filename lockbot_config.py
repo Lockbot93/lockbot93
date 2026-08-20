@@ -921,6 +921,37 @@ OPTIONS_ENTRY_FILL_TIMEOUT_MINUTES = 15
 # 0.0 to restore at-the-touch pricing.
 OPTIONS_ENTRY_LIMIT_BUFFER_PERCENT = 0.03
 
+# How far across the spread an entry limit sits, 0.0 = mid, 1.0 = the touch.
+#
+# LOCKBOT ruled 0.5 on 2026-08-19 (channel 80b8a35f) and the reasoning is
+# worth more than the number.
+#
+# The old design priced entries at ask x 1.03 -- ABOVE the offer -- to buy
+# fill certainty, after two PBR calls at the exact ask went unfilled on
+# 2026-07-30. That premise turned out to be false: the same design has
+# produced 4 of 10 ENTRY_NOT_FILLED since, so the 3% buffer bought roughly a
+# 60% fill rate, not certainty. It was paying over the offer for something
+# it was not receiving.
+#
+# 0.5 rather than 0.75 because the asymmetry runs the other way from the
+# exit side. A missed entry is free: there is no position to protect and no
+# proven edge forgone -- the options ledger on this account is 0-for-3. So
+# start at the cheap end and walk UP on measured fill rates, never down on
+# faith. The PBR evidence is n=2 on one illiquid underlying in one session;
+# it can speak to 1.0 with no cushion, not to 0.5 against 0.75.
+#
+# The buffer above still applies, but ONLY at 1.0 -- it exists to stop a
+# limit resting exactly at a moving touch, which is not a risk anywhere
+# inside the spread.
+#
+# DO NOT MOVE THIS ON A FEELING. LOCKBOT's conditions: log the fraction, the
+# quote at submit, fill or no fill, and time-to-fill on every entry, and run
+# an adverse-selection check before believing any saving -- mid-fills happen
+# preferentially when the market comes TOWARD you, so the filled and
+# unfilled cohorts must be compared on what the underlying did next. Decide
+# from about two weeks of that, not sooner.
+OPTIONS_ENTRY_LIMIT_FRACTION = 0.50
+
 # How many consecutive cycles the stop condition must hold before an
 # option is sold.
 #
