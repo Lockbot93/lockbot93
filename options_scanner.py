@@ -613,6 +613,92 @@ def affordable_now(
     )
 
 
+LIMIT_ATTEMPT_COLUMNS = [
+    "attempt_id", "timestamp", "symbol", "option_symbol", "side",
+    "limit_price", "quote_bid", "quote_ask", "limit_fraction",
+    "filled", "fill_price", "seconds_to_fill",
+    "underlying_move_after", "window_seconds", "note",
+]
+
+
+def log_limit_attempt(
+    *,
+    order_id: str,
+    symbol: str,
+    option_symbol: str,
+    limit_price: float,
+    quote_bid: float | None,
+    quote_ask: float | None,
+    note: str = "",
+) -> bool:
+    """Record one entry limit at the moment it is submitted.
+
+    THE OUTCOME IS DELIBERATELY LEFT BLANK. filled, fill_price and
+    seconds_to_fill are resolved later from the order, because at submission
+    time they are unknown -- and execution_cost.attempts_from_rows maps a
+    blank to None rather than to False, so an unresolved attempt is counted
+    as UNKNOWN in the denominator and never as a miss. Writing False here
+    would manufacture a fill-rate failure for every order still working.
+
+    Why this exists at all: OPTIONS_ENTRY_LIMIT_FRACTION moved to 0.5 on
+    2026-08-19, and LOCKBOT made the change conditional on measuring what it
+    does (channel 80b8a35f). Without these rows execution_cost's fill-rate
+    and adverse-selection sections have no input, and the saving would be
+    believed rather than shown. The adverse-selection check matters most:
+    mid-priced limits fill preferentially when the market comes TOWARD you,
+    so a naive comparison of filled prices flatters the change. That is why
+    underlying_move_after is recorded for unfilled attempts too.
+
+    Never raises. Losing a measurement row must not fail an order that has
+    already been submitted.
+    """
+
+    path = getattr(config, "EXECUTION_LIMIT_ATTEMPTS_FILE",
+                   config.PROJECT_FOLDER / "execution_limit_attempts.csv")
+
+    fraction = float(getattr(config, "OPTIONS_ENTRY_LIMIT_FRACTION", 1.0))
+
+    row = {
+        "attempt_id": str(order_id),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "symbol": symbol.upper(),
+        "option_symbol": option_symbol,
+        "side": "buy",
+        "limit_price": f"{limit_price:.4f}",
+        "quote_bid": "" if quote_bid is None else f"{quote_bid:.4f}",
+        "quote_ask": "" if quote_ask is None else f"{quote_ask:.4f}",
+        "limit_fraction": f"{fraction:.2f}",
+        "filled": "",
+        "fill_price": "",
+        "seconds_to_fill": "",
+        "underlying_move_after": "",
+        "window_seconds": "",
+        "note": note,
+    }
+
+    try:
+        header = csv_schema.ensure_schema(path, LIMIT_ATTEMPT_COLUMNS,
+                                          verbose=False)
+        exists = Path(path).exists()
+
+        with open(path, "a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=header)
+
+            if not exists:
+                writer.writeheader()
+
+            writer.writerow({key: row.get(key, "") for key in header})
+
+        return True
+    except csv_schema.SchemaRefused as refusal:
+        _refuse_collector(path, refusal, "limit attempt log")
+        return False
+    except Exception as error:                          # noqa: BLE001
+        print(f"  limit attempt log unavailable: "
+              f"{type(error).__name__}: {error}")
+        return False
+
+
 def entry_limit_price(price: float, mid: float | None = None) -> float:
     """Where inside the spread an entry limit sits.
 
@@ -1526,6 +1612,22 @@ def run_options_scanner() -> OptionsScannerSummary:
                 )
                 continue
 
+            # Record the limit BEFORE anything else can fail. The order is
+            # already at the broker; if the measurement row is lost the
+            # f=0.5 change becomes unmeasurable, which is the one condition
+            # LOCKBOT attached to approving it.
+            log_limit_attempt(
+                order_id=str(order.id),
+                symbol=symbol,
+                option_symbol=long_quote.symbol,
+                limit_price=limit_per_contract,
+                quote_bid=(long_quote.bid if short_quote is None
+                           else long_quote.bid - short_quote.ask),
+                quote_ask=(long_quote.ask if short_quote is None
+                           else long_quote.ask - short_quote.bid),
+                note=strategy,
+            )
+
             position_id = str(uuid.uuid4())
 
             positions[position_id] = OptionPosition(
@@ -1909,6 +2011,60 @@ def _self_test() -> int:
     # same scan would otherwise both submit.
     engaged.add("EWZ")
     check("claiming inside the cycle blocks the second", "EWZ" in engaged)
+
+    print()
+    print("The f=0.5 change is measurable, or it is a belief")
+
+    import tempfile as _tmp
+    _dir = _tmp.mkdtemp()
+    _path = Path(_dir) / "attempts.csv"
+    _orig = getattr(config, "EXECUTION_LIMIT_ATTEMPTS_FILE", None)
+    config.EXECUTION_LIMIT_ATTEMPTS_FILE = _path
+
+    try:
+        ok = log_limit_attempt(
+            order_id="order-1", symbol="XLF",
+            option_symbol="XLF260911C00058000",
+            limit_price=0.33, quote_bid=0.30, quote_ask=0.34,
+            note="BULL_CALL_SPREAD",
+        )
+        check("an attempt is written at submission", ok)
+
+        written = list(csv.DictReader(open(_path, newline="", encoding="utf-8")))
+        check("exactly one row", len(written) == 1, str(len(written)))
+
+        row = written[0]
+        check("it records the fraction in force",
+              row["limit_fraction"] == f"{config.OPTIONS_ENTRY_LIMIT_FRACTION:.2f}",
+              row["limit_fraction"])
+        check("and the quote at submit, both sides",
+              row["quote_bid"].startswith("0.30")
+              and row["quote_ask"].startswith("0.34"))
+        check("the outcome is BLANK, not False",
+              row["filled"] == "" and row["fill_price"] == "")
+
+        # The reason blank matters: execution_cost must count it as unknown,
+        # never as a miss, or every working order becomes a fill-rate failure.
+        import execution_cost as ec
+        attempts = ec.attempts_from_rows(written)
+        check("execution_cost reads it back", len(attempts) == 1)
+        check("and treats a blank outcome as UNKNOWN, not a miss",
+              attempts[0].filled is None, str(attempts[0].filled))
+
+        filled, unfilled, unknown = ec.fill_rate(attempts)
+        check("so it lands in the unknown bucket",
+              (filled, unfilled, unknown) == (0, 0, 1),
+              f"{filled}/{unfilled}/{unknown}")
+
+        check("the adverse-selection field exists for unfilled rows too",
+              "underlying_move_after" in row)
+    finally:
+        if _orig is not None:
+            config.EXECUTION_LIMIT_ATTEMPTS_FILE = _orig
+        else:
+            delattr(config, "EXECUTION_LIMIT_ATTEMPTS_FILE")
+        import shutil as _sh
+        _sh.rmtree(_dir, ignore_errors=True)
 
     print()
     print("Entries price inside the spread, not over the offer")
