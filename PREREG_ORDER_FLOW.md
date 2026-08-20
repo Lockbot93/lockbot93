@@ -130,3 +130,69 @@ this one:
 > pre-registration working, not a reason to amend it.
 >
 > One attempt, then the family is dead either way.
+
+---
+
+# OUTCOME: CLOSED ON INFEASIBILITY, 2026-08-20
+
+**Not tested. Not refuted. Unmeasurable at this account's data-access cost.**
+That is a different verdict from *failed* and must be relayed in exactly
+those terms.
+
+## What the cost probes measured
+
+    FULL TAPE, one session, 2024-03-01, feed=sip
+      AAPL   871,027 trades                          37.0s
+      XLF     85,437 trades / 475,228 quotes         25.2s
+      -> 78 symbols x 756 sessions = 407+ hours, and AAPL is 10x XLF
+
+The quote rule needs the prevailing NBBO at every trade, so quotes must be
+pulled too — and they outnumber trades roughly six to one. That is what
+made the full-tape scope impossible.
+
+## The one amendment, and why it was admissible
+
+LOCKBOT amended the aggregation to **six fixed 10-minute windows** — 09:30,
+10:00, 11:00, 13:00, 14:30, 15:50 ET — identical for every symbol and every
+session, chosen before any data was pulled.
+
+Its reasoning is the part worth keeping:
+
+> the amendment can only hurt the hypothesis. Sampling noise inflates the
+> baseline sd and attenuates z, so marginal days fall out rather than in. A
+> pre-data change that biases toward failure is a correction, not a rescue.
+
+It committed at the same moment that a **second** overrun meant kill:
+
+> One amendment is a correction; two is negotiation.
+
+## The second probe
+
+    WINDOWS ONLY, same session
+      AAPL   171,829 trades / 189,788 quotes         14.4s
+      XLF     22,439 trades /  61,825 quotes          5.0s
+      mean 9.7s per symbol-day
+      -> 78 x 756 = 158 HOURS, against a 60-130h estimate
+
+## Why a background run was refused
+
+158 hours is 6.6 days and is *not* beyond the hardware. It was refused
+anyway, and the reason is not compute:
+
+> a 6.6-day continuous tick pull would contend for API budget with
+> options_manager, the sole stop loss on open option positions, and no
+> backtest justifies that exposure
+
+No variants. No off-hours runs. No rate-ceilinged pulls.
+
+## The door that stays open
+
+Revisit **only** if data access changes materially — bulk historical tick
+files rather than per-request API pulls. That would be a **new
+registration**, not a resurrection of this one.
+
+## What this cost, and what it bought
+
+A few probe requests. Nothing else. The hypothesis was never contaminated
+by a peek at a result, because the cost was measured before the analysis
+rather than during it.
