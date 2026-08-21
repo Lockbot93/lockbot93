@@ -2129,6 +2129,30 @@ def brief(send: bool = True) -> str:
     return text
 
 
+def _record_ask(question: str, answer: str) -> None:
+    """Write a --ask exchange to the conversation log, before it is shown.
+
+    Never raises. A logging failure must not be able to destroy the answer
+    it was meant to preserve -- which is the failure this exists to stop.
+    """
+
+    try:
+        import lockbot_config as _config
+
+        path = _config.PROJECT_FOLDER / "conversation_log.jsonl"
+
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "channel": "ask",
+                "user_id": None,
+                "question": question,
+                "reply": answer,
+            }) + "\n")
+    except Exception as error:                          # noqa: BLE001
+        print(f"[could not log this exchange: {type(error).__name__}: {error}]")
+
+
 def ask(
     question: str,
     state: dict | None = None,
@@ -2900,7 +2924,38 @@ def main() -> int:
         return 0
 
     if args.ask:
-        print(ask(args.ask))
+        answer = ask(args.ask)
+
+        # PERSIST BEFORE PRINTING, and the order is the whole fix.
+        #
+        # On 2026-08-20 a full ruling on the second-agent question was
+        # generated, cost real tokens, and was destroyed by
+        # UnicodeEncodeError on `print` -- a U+2212 minus sign the Windows
+        # console codec could not represent. Nothing had written it down
+        # yet, so the reasoning simply ceased to exist and had to be asked
+        # again.
+        #
+        # --ask output was never persisted anywhere: chat() keeps its own
+        # history and the channel only receives what LOCKBOT chooses to
+        # file, so a conversational answer lived in stdout alone. A
+        # terminal scroll, a killed process or an unprintable character
+        # were each sufficient to lose it.
+        #
+        # This is the diagnosis-with-nowhere-to-go problem the agent
+        # channel was built for, reappearing one layer down: LOCKBOT
+        # reasoned, and there was no wire.
+        _record_ask(args.ask, answer)
+
+        try:
+            print(answer)
+        except UnicodeEncodeError:
+            # The answer is already saved. Print what this console can
+            # render rather than losing the run over a character.
+            encoding = getattr(sys.stdout, "encoding", "utf-8") or "utf-8"
+            print(answer.encode(encoding, errors="replace").decode(encoding))
+            print("\n[some characters could not be shown in this console; "
+                  "the full reply is in conversation_log.jsonl]")
+
         return 0
 
     if args.chat:
