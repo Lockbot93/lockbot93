@@ -507,7 +507,29 @@ if ACCOUNT_PROFILE == "small":
     # days. Trades held overnight are not day trades and don't count.
     MAX_TRADES_PER_DAY = 10
     MAX_TOTAL_EXPOSURE_PERCENT = 0.80
-    MAX_DAILY_LOSS_PERCENT = 0.02
+
+    # Raised from 0.02 to 0.10 on 2026-08-20, on the owner's direct
+    # instruction: "I don't want Lockbot to lock itself out of trades for
+    # the rest of the day. Take the blows and move forward."
+    #
+    # It had been a runtime override since that morning. Made permanent
+    # here because an override is a file, and a file can be deleted,
+    # emptied or fail to parse -- at which point the limit silently
+    # reverts to 0.02 and the lockout the owner overrode comes back
+    # without anyone touching a setting. A decision that matters should
+    # not depend on a JSON file surviving.
+    #
+    # WHAT THIS GIVES UP, stated plainly rather than buried: the daily
+    # circuit breaker is now five times looser, and at this account size
+    # the per-trade caps are the only real brakes -- the full-debit
+    # ceiling at 10% of equity, and the -35% software stop. The owner
+    # chose throughput over the breaker knowing that.
+    #
+    # The "standard" profile below keeps 0.02 deliberately. Ten percent of
+    # a ~$100K account is a different quantity of money and this reasoning
+    # does not carry across.
+    MAX_DAILY_LOSS_PERCENT = 0.10
+
     MAX_SAME_DIRECTION_POSITIONS = 2
     MAX_NEW_ENTRIES_PER_CYCLE = 1
 
