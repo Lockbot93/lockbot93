@@ -1447,6 +1447,31 @@ def run_options_manager() -> OptionsManagerSummary:
             del positions[position_id]
             summary.closed += 1
 
+        # ---- Close the loop on entry limits before anything else
+        #
+        # options_scanner records every entry limit with a BLANK outcome,
+        # because at submission nobody knows it. Nothing wrote it back, so
+        # on 2026-08-20 the report read "attempts 4, filled 0, unfilled 0,
+        # unknown 4" -- LOCKBOT approved f=0.5 on the condition its effect
+        # be measured, and the measurement could accumulate rows forever
+        # without ever producing a verdict.
+        #
+        # Here rather than in a script because a resolver nobody runs is
+        # the same defect one layer out. This module already talks to the
+        # broker every cycle and only asks about attempts still blank,
+        # which is normally none.
+        try:
+            import resolve_attempts
+
+            outcome = resolve_attempts.resolve(trading_client, verbose=False)
+
+            if outcome.get("resolved"):
+                print(f"Entry attempts resolved: {outcome['resolved']} "
+                      f"({outcome['still_working']} still working)")
+        except Exception as error:                      # noqa: BLE001
+            print(f"Entry attempts not resolved: "
+                  f"{type(error).__name__}: {error}")
+
         # ---- Anything the broker holds that we do not track
         tracked_symbols = set()
 
