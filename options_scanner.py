@@ -699,6 +699,84 @@ def log_limit_attempt(
         return False
 
 
+def benched_underlyings(today: date | None = None) -> dict[str, dict]:
+    """Underlyings benched by a recent realised stop, and why.
+
+    THE MEMORY. Owner directive 2026-08-20, designed by LOCKBOT as channel
+    item 152a38bd after the scanner re-entered the SOFI Sep-18 19/20 spread
+    two days after those exact strikes stopped out at -36.8%. Nothing on the
+    entry path had ever read the completed-trades ledger, so every cycle met
+    every name for the first time.
+
+    READ FROM THE JOURNAL, NEVER FROM MEMORY. The ledger is the same file
+    options_manager writes, so the bench survives a restart and is visible
+    on day one for stops that predate this code. In-memory state would have
+    forgotten SOFI the moment the controller cycled.
+
+    KEYED ON THE UNDERLYING, not the contract symbol. Re-entering SOFI at
+    different strikes is the same mistake wearing a different name.
+
+    Only STOP_LOSS counts. A take-profit is not a reason to bench a name,
+    and an unfilled entry never happened.
+
+    Returns {SYMBOL: {"sessions_ago": int, "loss": float, "when": str}}.
+    Never raises: a scanner that cannot read the ledger must still scan.
+    """
+
+    sessions = int(getattr(config, "OPTIONS_LOSS_COOLDOWN_SESSIONS", 0))
+
+    if sessions <= 0:
+        return {}
+
+    today = today or datetime.now(timezone.utc).date()
+    benched: dict[str, dict] = {}
+
+    try:
+        rows = csv_schema.read_rows(config.OPTIONS_COMPLETED_FILE, strict=False)
+    except Exception:                                   # noqa: BLE001
+        return {}
+
+    # Distinct session dates in the ledger, newest first. Counting SESSIONS
+    # rather than calendar days is what stops a weekend serving two thirds
+    # of a five-session bench.
+    seen_dates = sorted(
+        {(r.get("exit_time") or "")[:10] for r in rows if r.get("exit_time")},
+        reverse=True,
+    )
+
+    for row in rows:
+        if (row.get("exit_reason") or "").strip().upper() != "STOP_LOSS":
+            continue
+
+        symbol = (row.get("underlying") or "").strip().upper()
+        when = (row.get("exit_time") or "")[:10]
+
+        if not symbol or not when:
+            continue
+
+        try:
+            ago = seen_dates.index(when)
+        except ValueError:
+            continue
+
+        if ago >= sessions:
+            continue
+
+        try:
+            loss = float(row.get("profit_loss") or 0.0)
+        except (TypeError, ValueError):
+            loss = 0.0
+
+        current = benched.get(symbol)
+
+        if current is None or ago < current["sessions_ago"]:
+            benched[symbol] = {
+                "sessions_ago": ago, "loss": loss, "when": when,
+            }
+
+    return benched
+
+
 def entry_limit_price(price: float, mid: float | None = None) -> float:
     """Where inside the spread an entry limit sits.
 
@@ -1233,7 +1311,58 @@ def run_options_scanner() -> OptionsScannerSummary:
         if engaged:
             print(f"Already engaged in: {', '.join(sorted(engaged))}")
 
+        benched = benched_underlyings()
+
+        if benched:
+            print("Benched after a realised stop: " + ", ".join(
+                f"{sym} ({info['sessions_ago']}/"
+                f"{config.OPTIONS_LOSS_COOLDOWN_SESSIONS} sessions)"
+                for sym, info in sorted(benched.items())
+            ))
+
         for candidate in candidates:
+            benched_info = benched.get(candidate["symbol"].upper())
+
+            if benched_info is not None:
+                print(
+                    f"\n{candidate['symbol']}: skipped — lost "
+                    f"${abs(benched_info['loss']):.2f} on this name "
+                    f"{benched_info['sessions_ago']} session(s) ago "
+                    f"({benched_info['when']}). Benched for "
+                    f"{config.OPTIONS_LOSS_COOLDOWN_SESSIONS} sessions."
+                )
+                summary.rejection_reasons["LOSS_COOLDOWN"] = (
+                    summary.rejection_reasons.get("LOSS_COOLDOWN", 0) + 1
+                )
+
+                # CLAUSE 3 OF 152a38bd, and the reason this rule is
+                # falsifiable rather than a hunch. Every blocked entry is
+                # logged exactly like a taken one, so its outcome resolves
+                # alongside the trades that were allowed. In roughly thirty
+                # resolutions the shadow book answers the question this
+                # cooldown cannot answer about itself: would the blocked
+                # re-entries have won? If they would, the memory is
+                # destroying value and the log will say so plainly.
+                #
+                # A rule that blocks trades and keeps no record of what it
+                # blocked can never be removed on evidence, only on taste.
+                append_shadow_row({
+                    "timestamp": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"),
+                    "underlying": candidate["symbol"],
+                    "strategy": candidate.get("strategy", ""),
+                    "regime": candidate.get("regime", ""),
+                    "signal": candidate.get("signal", ""),
+                    "confidence": candidate.get("score", ""),
+                    "action": "COOLDOWN_BLOCKED",
+                    "reason": (
+                        f"lost ${abs(benched_info['loss']):.2f} "
+                        f"{benched_info['sessions_ago']}s ago "
+                        f"({benched_info['when']})"
+                    ),
+                })
+                continue
+
             if candidate["symbol"].upper() in engaged:
                 print(
                     f"\n{candidate['symbol']}: skipped — already holding or "
@@ -1780,6 +1909,18 @@ def _price_at(fraction: float, touch: float, mid: float) -> float:
         config.OPTIONS_ENTRY_LIMIT_FRACTION = original
 
 
+def _disabled_benched() -> dict:
+    """benched_underlyings with the cooldown set to 0. Self-test only."""
+
+    original = getattr(config, "OPTIONS_LOSS_COOLDOWN_SESSIONS", 5)
+    config.OPTIONS_LOSS_COOLDOWN_SESSIONS = 0
+
+    try:
+        return benched_underlyings()
+    finally:
+        config.OPTIONS_LOSS_COOLDOWN_SESSIONS = original
+
+
 def _self_test() -> int:
     """Offline checks. No network, no credentials."""
 
@@ -2011,6 +2152,35 @@ def _self_test() -> int:
     # same scan would otherwise both submit.
     engaged.add("EWZ")
     check("claiming inside the cycle blocks the second", "EWZ" in engaged)
+
+    print()
+    print("The scanner remembers losing on a name")
+
+    _src = Path(__file__).read_text(encoding="utf-8")
+    _body = _src.split("def _self_test")[0]
+
+    live = benched_underlyings()
+    check("it reads the real ledger and finds the recent stops",
+          len(live) > 0, f"{len(live)} benched")
+    check("SOFI is benched -- the trade that caused the directive",
+          "SOFI" in live, str(sorted(live)))
+    check("it keys on the UNDERLYING, not the contract symbol",
+          all(len(k) <= 6 and not any(c.isdigit() for c in k) for k in live),
+          str(sorted(live)))
+
+    check("only realised STOP_LOSS benches a name",
+          'STOP_LOSS' in _body and 'exit_reason' in _body)
+    check("a cooldown of 0 disables the memory entirely",
+          _disabled_benched() == {})
+
+    check("blocked entries are SHADOW LOGGED, or the rule is unfalsifiable",
+          "COOLDOWN_BLOCKED" in _body and "append_shadow_row" in _body)
+    check("and the block is counted as its own reason",
+          '"LOSS_COOLDOWN"' in _body)
+    check("the memory survives a restart -- it reads the journal, not state",
+          "OPTIONS_COMPLETED_FILE" in _body and "read_rows" in _body)
+    check("an unreadable ledger does not stop the scan",
+          "return {}" in _body)
 
     print()
     print("The f=0.5 change is measurable, or it is a belief")

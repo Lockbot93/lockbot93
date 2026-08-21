@@ -63,6 +63,9 @@ ALLOWED: dict[str, tuple] = {
         int, 0, 10, "Option entries opened per session."),
     "OPTIONS_STOP_CONFIRM_CYCLES": (
         int, 1, 5, "Cycles a stop must hold before it fires."),
+    "OPTIONS_LOSS_COOLDOWN_SESSIONS": (
+        int, 0, 20, "Sessions a name is benched after a realised stop. "
+                    "0 disables the memory entirely."),
 
     "OPTIONS_MAX_SPREAD_PERCENT": (
         float, 0.01, 0.25, "Widest quoted spread an entry may pay."),

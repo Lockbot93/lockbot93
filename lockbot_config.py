@@ -967,6 +967,28 @@ OPTIONS_ENTRY_LIMIT_FRACTION = 0.50
 # the old immediate behaviour.
 OPTIONS_STOP_CONFIRM_CYCLES = 2
 
+# Sessions an underlying is benched after a realised options STOP_LOSS.
+#
+# Owner directive 2026-08-20: "Make it to where the scanner has memory
+# losing on a name so it is aware." The trigger was options_scanner
+# re-entering the SOFI Sep-18 19/20 spread -- the identical strikes that
+# stopped out at -36.8% two days earlier -- because nothing on the entry
+# path had ever read the completed-trades ledger.
+#
+# A COOLDOWN, NOT A SCORE. LOCKBOT's design ruling (channel 152a38bd): a
+# mechanical bench, keyed on the UNDERLYING rather than the contract, read
+# from the journal rather than memory so it survives a restart. Fitting a
+# predictive rule to four closed trades would be a curve fit; benching a
+# name for a fixed count is a rule that can be measured and removed.
+#
+# IT SHIPS ON A DIRECTIVE, NOT ON EVIDENCE, and that is recorded rather
+# than glossed: four realised option losses is far below any sample floor.
+# Every entry this blocks is shadow-logged as cooldown_blocked, so in
+# roughly thirty resolutions the data says whether the blocked trades
+# would have won. If they would have, the cooldown is destroying value and
+# the log will prove it.
+OPTIONS_LOSS_COOLDOWN_SESSIONS = 5
+
 # What a contract may cost to OWN, as opposed to to trade.
 #
 # Added 2026-08-04. Every other gate asks whether a contract is tradable;

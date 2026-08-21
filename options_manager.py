@@ -1261,14 +1261,51 @@ def run_options_manager() -> OptionsManagerSummary:
 
                 # FILLED or UNKNOWN fall through to the normal close path.
 
-            # The position is gone. Journal it using the last known exit
-            # value if we have one; otherwise record it with zero credit
-            # and flag the reason, so it is never silently dropped.
+            # The position is gone. ASK THE BROKER WHAT IT SOLD FOR.
+            #
+            # This used to journal `position.highest_value or 0.0` -- the
+            # best price the position ever reached, or zero. Both are
+            # fabrications. highest_value is by definition the most
+            # flattering number in the position's life, so a losing trade
+            # closed here was recorded at its high-water mark.
+            #
+            # It happened on 2026-08-20. The XLF 58/58.5 spread was
+            # restored with highest_value seeded at its $32.00 entry debit,
+            # then closed at 0.09 -- a $9.00 credit, a real -$23.00 loss.
+            # It was journaled exit_credit $32.00, P/L $0.00, a breakeven
+            # that never occurred. The ledger then understated the day by
+            # $23 and the options daily-loss check disagreed with
+            # market_scanner's by more than eleven points, which blocked
+            # entries on a number that was wrong rather than on risk.
+            #
+            # The exit order id is right there. Read it. Fall back to the
+            # last mark ONLY when the order cannot be read, and say so in
+            # the exit reason rather than passing a guess off as a fill.
+            exit_credit = None
+            credit_source = "fill"
+
+            if position.exit_order_id:
+                try:
+                    exit_order = trading_client.get_order_by_id(
+                        position.exit_order_id
+                    )
+                except Exception:                      # noqa: BLE001
+                    exit_order = None
+
+                if exit_order is not None:
+                    exit_credit = exit_credit_from_order(exit_order)
+
+            if exit_credit is None:
+                exit_credit = position.highest_value or 0.0
+                credit_source = "estimate"
+
             record_completed_option_trade(
                 position,
-                exit_credit=position.highest_value or 0.0,
+                exit_credit=exit_credit,
                 exit_time=now,
-                exit_reason=position.exit_reason or "CLOSED_AT_BROKER",
+                exit_reason=(
+                    position.exit_reason or "CLOSED_AT_BROKER"
+                ) + ("" if credit_source == "fill" else "_EST"),
             )
 
             print(
