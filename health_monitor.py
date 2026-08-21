@@ -661,6 +661,75 @@ def run_config_sweep() -> None:
         print(f"\nConfig sweep failed: {type(error).__name__}: {error}")
 
 
+def run_rule_review() -> None:
+    """Once a day, ask what each remembered rule has actually cost.
+
+    Attached here for the same reason config_sweep is: an unscheduled
+    reviewer is the defect class it exists to catch. health_monitor beats
+    every controller cycle, so this is the one place with continuous
+    evidence of execution.
+
+    TRANSITIONS ONLY. LOCKBOT's answer (channel 963343a5) to "what stops
+    the review becoming the thing nobody reads" -- a line that says the
+    same thing every day trains the reader to skip it, and a skipped
+    report is the untracked-position alert all over again. It files only
+    when a status, a count or an orphan changes.
+
+    COSTING_MONEY marks the module DEGRADED, because module_health is read
+    unconditionally by every session while a log line is not.
+
+    Never raises, and never acts on its own verdict. Disabling a rule is
+    the owner's decision or LOCKBOT's.
+    """
+
+    try:
+        import rule_registry
+    except Exception as error:                          # noqa: BLE001
+        print(f"\nRule review unavailable: {type(error).__name__}: {error}")
+        return
+
+    try:
+        if not rule_registry.should_run_today():
+            return
+
+        review = rule_registry.run_review()
+        changed = review.fingerprint() != rule_registry.last_fingerprint()
+
+        rule_registry.record_run(review)
+        rule_registry.append_verdicts(review)
+
+        print()
+        rule_registry.report(review)
+
+        if not changed:
+            return
+
+        from system_heartbeat import mark_module_degraded
+
+        if review.costing:
+            names = ", ".join(r.setting for r in review.costing)
+            mark_module_degraded(
+                "RULE_REVIEW",
+                message=(
+                    f"{names} is COSTING MONEY on its own pre-agreed "
+                    "metric. Removing it is an owner decision."
+                ),
+                error="",
+            )
+        elif review.unregistered:
+            mark_module_degraded(
+                "RULE_REVIEW",
+                message=(
+                    "Behavioural rules with no pre-agreed floor: "
+                    + ", ".join(review.unregistered)
+                    + ". A rule that cannot fail is a preference."
+                ),
+                error="",
+            )
+    except Exception as error:                          # noqa: BLE001
+        print(f"\nRule review failed: {type(error).__name__}: {error}")
+
+
 def main() -> None:
     """Run the complete LOCKBOT health inspection."""
 
@@ -693,6 +762,7 @@ def main() -> None:
     print("=" * 78)
 
     run_config_sweep()
+    run_rule_review()
 
 
 def _self_test() -> int:

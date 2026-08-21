@@ -99,3 +99,5 @@ options_tradeable_*.csv
 options_tradeable_latest.txt
 watchdog.log
 config_sweep_state.json
+rule_registry_state.json
+rule_registry.jsonl
