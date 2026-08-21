@@ -149,6 +149,48 @@ REGISTRY: list[dict[str, Any]] = [
             "net < 0 at the floor is COSTING_MONEY; net > 0 is WORKING."
         ),
     },
+    {
+        "rule_id": "stop_confirm_cycles",
+        "setting": "OPTIONS_STOP_CONFIRM_CYCLES",
+        "mechanism": (
+            "A stop must hold across N consecutive cycles before it fires. "
+            "Take-profit and the time rules still fire immediately; only "
+            "the destructive rule waits."
+        ),
+        "adopted_at": "2026-08-03, registered 2026-08-20",
+        "authority": "LOCKBOT, channel e86b3e97",
+        "basis": "evidence",
+        "power_note": (
+            "Added after an EWZ call exited at -8.1% against a -35% stop on "
+            "a single bad bid print, with no trade in that window printing "
+            "near the level. It ran for 17 days billing a visible cost on "
+            "every real stop while banking an invisible benefit, because "
+            "stop_strikes lives in position state and a recovery RESETS it "
+            "-- erasing the evidence that the rule worked."
+        ),
+        "metric_source": "options_strike_events.csv, first-strike events",
+        "metric": (
+            "MEAN delta in fractions of the debit, where delta = "
+            "(Vf - V0) / entry_debit and V0 is the bid-priced value at the "
+            "0->1 transition. Same formula on both paths. NEVER event "
+            "counts -- one INTC-scale decay outweighs many small "
+            "recoveries."
+        ),
+        "floor_n": 30,
+        "resolution": 0.05,
+        "verdict_rule": (
+            "mean delta <= -0.05 of debit is COSTING_MONEY; >= +0.05 is "
+            "WORKING. MEASUREMENT_STALLED if fewer than 30 events after 20 "
+            "trading sessions."
+        ),
+        "cost_note": (
+            "The ~7%-of-debit overshoot on the four realised stops is NOT "
+            "this rule's cost and must never seed it. NVDA and INTC both "
+            "exited 13:35:24Z, the first cycle after the open, so that "
+            "damage was overnight gap-through -- already in the price "
+            "before the rule saw a strike."
+        ),
+    },
 ]
 
 # Behavioural rules that must appear in the registry or be reported as
@@ -343,9 +385,72 @@ def review_entry_fraction(entry: dict[str, Any]) -> RuleReview:
     return out
 
 
+def review_stop_confirm(entry: dict[str, Any]) -> RuleReview:
+    """Does waiting a cycle before selling help or hurt?"""
+
+    out = RuleReview(entry["rule_id"], entry["setting"], ACCUMULATING,
+                     floor_n=entry["floor_n"], basis=entry["basis"])
+
+    if int(getattr(config, entry["setting"], 1)) <= 1:
+        out.status = NEUTRAL_ON_DIRECTIVE
+        out.detail = "confirmation is off, so there is nothing to judge"
+        return out
+
+    path = getattr(config, "OPTIONS_STRIKE_EVENTS_FILE",
+                   config.PROJECT_FOLDER / "options_strike_events.csv")
+    rows = _rows(Path(path))
+
+    deltas = []
+    for row in rows:
+        raw = (row.get("delta") or "").strip()
+        if not raw:
+            continue
+        try:
+            deltas.append(float(raw))
+        except ValueError:
+            continue
+
+    out.n = len(deltas)
+    open_events = sum(1 for r in rows if not (r.get("resolved_at") or "").strip())
+
+    if out.n < out.floor_n:
+        out.detail = (
+            f"{out.needs} more resolved strike events before this can be "
+            f"judged"
+            + (f" ({open_events} open)" if open_events else "")
+        )
+        return out
+
+    out.value = statistics.mean(deltas)
+    edge = entry["resolution"]
+
+    if out.value <= -edge:
+        out.status = COSTING_MONEY
+        out.detail = (
+            f"waiting cost {out.value:+.1%} of the debit on average across "
+            f"{out.n} events. The delay is more expensive than the false "
+            "exits it prevents."
+        )
+    elif out.value >= edge:
+        out.status = WORKING
+        out.detail = (
+            f"waiting gained {out.value:+.1%} of the debit on average -- "
+            "the recoveries outweigh the decay."
+        )
+    else:
+        out.status = NEUTRAL_ON_DIRECTIVE
+        out.detail = (
+            f"{out.value:+.1%} of debit, inside the {edge:.0%} this sample "
+            "can resolve."
+        )
+
+    return out
+
+
 REVIEWERS = {
     "options_loss_cooldown": review_cooldown,
     "entry_limit_fraction": review_entry_fraction,
+    "stop_confirm_cycles": review_stop_confirm,
 }
 
 
@@ -516,14 +621,22 @@ def _self_test() -> int:
 
     print("\nAgainst the real project")
     live = run_review()
-    check("both live rules are reviewed", len(live.rules) == 2, str(len(live.rules)))
+    check("all three live rules are reviewed", len(live.rules) == 3,
+          str(len(live.rules)))
     check("nothing is judgeable yet, which is correct at n=0",
           all(r.status in (ACCUMULATING, NEUTRAL_ON_DIRECTIVE,
                            MEASUREMENT_STALLED) for r in live.rules),
           str([(r.setting, r.status) for r in live.rules]))
-    check("OPTIONS_STOP_CONFIRM_CYCLES is flagged UNREGISTERED",
-          "OPTIONS_STOP_CONFIRM_CYCLES" in live.unregistered,
+    check("the orphan it found on day one is now registered",
+          "OPTIONS_STOP_CONFIRM_CYCLES" not in live.unregistered,
           str(live.unregistered))
+    check("and no orphans remain", not live.unregistered, str(live.unregistered))
+
+    stop = [e for e in REGISTRY if e["rule_id"] == "stop_confirm_cycles"][0]
+    check("the gap-through overshoot is recorded as NOT this rule's cost",
+          "NOT" in stop["cost_note"] and "gap-through" in stop["cost_note"])
+    check("the verdict is a mean, never a count of events",
+          "NEVER event" in stop["metric"])
 
     print()
 

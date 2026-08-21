@@ -346,6 +346,128 @@ class ExitDecision:
     return_percent: float = 0.0
 
 
+STRIKE_EVENT_COLUMNS = [
+    "event_id", "opened_at", "position_id", "underlying", "entry_debit",
+    "v0", "confirm_cycles", "resolved_at", "vf", "path", "delta",
+]
+
+
+def strike_log_path() -> Any:
+    return getattr(config, "OPTIONS_STRIKE_EVENTS_FILE",
+                   config.PROJECT_FOLDER / "options_strike_events.csv")
+
+
+def log_strike_open(position: Any, v0: float) -> None:
+    """Record the moment a position first crosses its stop.
+
+    WHY THIS FILE HAS TO EXIST AT ALL. OPTIONS_STOP_CONFIRM_CYCLES makes
+    every real stop wait a cycle, and it was adopted on 2026-08-03 after an
+    EWZ call exited at -8.1% against a -35% stop on a single bad bid print.
+    Its COST is visible in every confirmed stop. Its BENEFIT is a
+    non-event -- a position that crossed the stop and recovered -- and
+    stop_strikes lives only in position state, where a recovery RESETS it
+    to zero and erases the evidence.
+
+    So the rule bills a visible cost and banks an invisible benefit, which
+    is exactly why it sat in the registry as an orphan that could never
+    fail. LOCKBOT's ruling (channel e86b3e97): without this row the
+    benefit side is unobservable and the rule stays unjudgeable.
+
+    V0 is current_exit_value at the transition -- already bid-priced, so
+    it is what the position could actually have been sold for at the
+    moment the rule chose to wait. Gap events need no exclusion because V0
+    is captured AFTER the gap.
+
+    Never raises. A lost measurement must not interrupt a stop.
+    """
+
+    try:
+        import csv as _csv
+        import csv_schema as _schema
+
+        path = strike_log_path()
+        header = _schema.ensure_schema(path, STRIKE_EVENT_COLUMNS, verbose=False)
+        exists = Path(path).exists()
+
+        with open(path, "a", newline="", encoding="utf-8") as handle:
+            writer = _csv.DictWriter(handle, fieldnames=header)
+
+            if not exists:
+                writer.writeheader()
+
+            writer.writerow({
+                "event_id": f"{position.position_id}:{datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+                "opened_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "position_id": position.position_id,
+                "underlying": position.underlying,
+                "entry_debit": f"{position.entry_debit:.2f}",
+                "v0": f"{v0:.2f}",
+                "confirm_cycles": getattr(
+                    config, "OPTIONS_STOP_CONFIRM_CYCLES", 2),
+                "resolved_at": "", "vf": "", "path": "", "delta": "",
+            })
+    except Exception as error:                          # noqa: BLE001
+        print(f"  strike event not logged: {type(error).__name__}: {error}")
+
+
+def resolve_strike_events(position: Any, vf: float, path_kind: str) -> int:
+    """Close out any open strike events for a position at its real exit.
+
+    Same formula on both paths, per the ruling: delta = (Vf - V0) / debit.
+    A confirmed stop resolves at its realised credit; a recovered position
+    stays open until whatever eventually closes it. The verdict is the MEAN
+    delta in fractions of the debit, never a count of events -- one
+    INTC-scale decay outweighs a great many small recoveries.
+    """
+
+    try:
+        import csv as _csv
+        import csv_schema as _schema
+
+        path = strike_log_path()
+        rows = _schema.read_rows(path, strict=False)
+
+        if not rows:
+            return 0
+
+        touched = 0
+
+        for row in rows:
+            if row.get("position_id") != position.position_id:
+                continue
+            if (row.get("resolved_at") or "").strip():
+                continue
+
+            try:
+                v0 = float(row["v0"])
+                debit = float(row["entry_debit"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if debit <= 0:
+                continue
+
+            row["resolved_at"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds")
+            row["vf"] = f"{vf:.2f}"
+            row["path"] = path_kind
+            row["delta"] = f"{(vf - v0) / debit:.4f}"
+            touched += 1
+
+        if touched:
+            header = list(rows[0].keys())
+
+            with open(path, "w", newline="", encoding="utf-8") as handle:
+                writer = _csv.DictWriter(handle, fieldnames=header)
+                writer.writeheader()
+                writer.writerows(rows)
+
+        return touched
+    except Exception as error:                          # noqa: BLE001
+        print(f"  strike events not resolved: {type(error).__name__}: {error}")
+        return 0
+
+
 def decide_exit(
     position: OptionPosition,
     current_value: float | None,
@@ -1308,6 +1430,15 @@ def run_options_manager() -> OptionsManagerSummary:
                 ) + ("" if credit_source == "fill" else "_EST"),
             )
 
+            # Close out any strike event this position left open, whichever
+            # way it went. A confirmed stop and a recovery that later exited
+            # for another reason both resolve with the same formula.
+            resolve_strike_events(
+                position, exit_credit,
+                "confirmed" if position.exit_reason == STOP_LOSS
+                else "recovered",
+            )
+
             print(
                 f"{position.underlying}: position closed at the broker. "
                 f"Journaled as {position.exit_reason or 'CLOSED_AT_BROKER'}."
@@ -1402,6 +1533,8 @@ def run_options_manager() -> OptionsManagerSummary:
                 if value is not None and value > position.highest_value:
                     position.highest_value = value
 
+                strikes_before = position.stop_strikes
+
                 decision = decide_exit(
                     position,
                     value,
@@ -1412,6 +1545,14 @@ def run_options_manager() -> OptionsManagerSummary:
                     max_hold_days=config.OPTIONS_MAX_HOLD_DAYS,
                     min_dte_exit=config.OPTIONS_MIN_DTE_EXIT,
                 )
+
+                # THE FIRST STRIKE, 0 -> 1: the cycle where the rule chose to
+                # wait rather than sell. V0 is what the position could have
+                # been sold for at that instant. Everything the confirmation
+                # rule can ever be judged on starts here -- see
+                # log_strike_open for why state alone cannot carry it.
+                if strikes_before == 0 and position.stop_strikes == 1                         and value is not None:
+                    log_strike_open(position, value)
 
                 label = f"{position.underlying} {position.strategy}"
 
