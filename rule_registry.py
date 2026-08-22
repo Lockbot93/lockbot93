@@ -270,14 +270,24 @@ def review_cooldown(entry: dict[str, Any]) -> RuleReview:
                if (r.get("action") or "").strip().upper() == "COOLDOWN_BLOCKED"]
 
     resolved = []
+    cohorts: dict[str, list[float]] = {}
+
     for row in blocked:
         raw = (row.get("r_multiple") or "").strip()
         if not raw:
             continue
         try:
-            resolved.append(float(raw))
+            value = float(raw)
         except ValueError:
             continue
+
+        resolved.append(value)
+
+        # An untagged row cannot be assigned to a cohort. It still counts
+        # toward the floor but is named, so it can never be mistaken for
+        # evidence about a particular version of the rule.
+        param = (row.get("rule_param") or "untagged").strip() or "untagged"
+        cohorts.setdefault(param, []).append(value)
 
     out.n = len(resolved)
 
@@ -294,6 +304,40 @@ def review_cooldown(entry: dict[str, Any]) -> RuleReview:
 
     out.value = statistics.mean(resolved)
     edge = entry["resolution"]
+
+    # THE COHORT SPLIT, per LOCKBOT's ruling (channel 2b0ae5d5).
+    #
+    # OPTIONS_LOSS_COOLDOWN_SESSIONS went 5 -> 1 on 2026-08-21. The
+    # per-row question is parameter-invariant, so the sample continues --
+    # but a 5-session bench blocks entries in sessions 1 through 5 after a
+    # loss while a 1-session bench blocks only session 1. If the post-loss
+    # effect decays with time those are different populations, and a
+    # pooled mean averages two different questions.
+    #
+    # So a SIGN FLIP between cohorts blocks a pooled COSTING_MONEY
+    # outright. Convicting a rule on a number that reverses depending on
+    # which version of it you look at is exactly the reasoning the
+    # registry exists to prevent.
+    means = {
+        param: statistics.mean(values)
+        for param, values in cohorts.items() if values
+    }
+
+    if len(means) > 1:
+        out.detail = "  ".join(
+            f"cohort {p}: {m:+.2f}R (n={len(cohorts[p])})"
+            for p, m in sorted(means.items())
+        )
+
+        signs = {m > 0 for m in means.values() if abs(m) >= edge}
+
+        if len(signs) > 1:
+            out.status = NEUTRAL_ON_DIRECTIVE
+            out.detail = (
+                "COHORTS DISAGREE IN SIGN, so no pooled verdict is "
+                "admissible. " + out.detail
+            )
+            return out
 
     if out.value >= edge:
         out.status = COSTING_MONEY
@@ -562,6 +606,17 @@ def report(review: Review) -> None:
         print("  anything when it comes.")
 
 
+def _src_of(fn: Any) -> str:
+    """Source of one function, for tests that assert on structure."""
+
+    import inspect
+
+    try:
+        return inspect.getsource(fn)
+    except (OSError, TypeError):
+        return ""
+
+
 def _self_test() -> int:
     failures: list[str] = []
 
@@ -618,6 +673,27 @@ def _self_test() -> int:
     check("it submits no orders", "submit_order" not in body)
     check("the only files it writes are its own",
           body.count("open(REGISTRY_FILE") + body.count("STATE_FILE.write_text") == 2)
+
+    print("\nCohorts cannot be pooled when they disagree")
+
+    # LOCKBOT's 2b0ae5d5 guard: a 5-session bench and a 1-session bench ask
+    # the same per-row question of different populations.
+    _rc = _src_of(review_cooldown)
+    check("the cooldown reviewer splits by rule_param", "cohorts" in _rc)
+    check("and a sign flip blocks a pooled verdict",
+          "COHORTS DISAGREE IN SIGN" in _rc)
+    check("an untagged row is named, not silently pooled", "untagged" in _rc)
+
+    import csv as _csv
+    _blocked = [r for r in _csv.DictReader(
+        open(config.OPTIONS_SHADOW_FILE, newline="", encoding="utf-8"))
+        if (r.get("action") or "") == "COOLDOWN_BLOCKED"]
+    check("every blocked row on disk carries a cohort",
+          all((r.get("rule_param") or "").strip() for r in _blocked),
+          f"{len(_blocked)} rows")
+    check("tagged with the parameter in force when written",
+          all(r.get("rule_param") == "5" for r in _blocked),
+          str([r.get("rule_param") for r in _blocked]))
 
     print("\nAgainst the real project")
     live = run_review()

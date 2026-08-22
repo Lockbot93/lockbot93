@@ -93,6 +93,23 @@ SHADOW_COLUMNS = [
     "term_slope",
     "action",
     "reason",
+    # Added 2026-08-21 on LOCKBOT's ruling (channel 2b0ae5d5), same
+    # pattern and same reason as the shadow book's pool-generation tag.
+    #
+    # OPTIONS_LOSS_COOLDOWN_SESSIONS went 5 -> 1 the day after it shipped.
+    # The per-row question the measurement asks -- would this blocked
+    # entry have won -- is parameter-invariant, so nothing already
+    # recorded is invalidated. The POPULATION is not: a 5-session bench
+    # blocks entries in sessions 1 through 5 after a loss, a 1-session
+    # bench only session 1. If the post-loss effect decays with time those
+    # are different populations, and pooling them would average two
+    # different questions into one number.
+    #
+    # So the verdict at n>=30 reports the per-parameter split, and a sign
+    # flip between cohorts blocks a pooled COSTING_MONEY verdict outright.
+    # An untagged row cannot be assigned to a cohort and is worth less
+    # than no row, because it looks like evidence.
+    "rule_param",
 ]
 
 
@@ -1360,6 +1377,10 @@ def run_options_scanner() -> OptionsScannerSummary:
                         f"{benched_info['sessions_ago']}s ago "
                         f"({benched_info['when']})"
                     ),
+                    # The cohort this row belongs to. Without it the row
+                    # is unassignable and worth less than nothing.
+                    "rule_param": str(
+                        config.OPTIONS_LOSS_COOLDOWN_SESSIONS),
                 })
                 continue
 
