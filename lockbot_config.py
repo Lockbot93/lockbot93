@@ -1009,7 +1009,30 @@ OPTIONS_STOP_CONFIRM_CYCLES = 2
 # roughly thirty resolutions the data says whether the blocked trades
 # would have won. If they would have, the cooldown is destroying value and
 # the log will prove it.
-OPTIONS_LOSS_COOLDOWN_SESSIONS = 5
+# Cut from 5 to 1 on 2026-08-21, one day after it shipped, on the owner's
+# instruction: "I don't want to miss out on opportunities just because of
+# one bad trade."
+#
+# The reversal is his, but the data had already made the case. At 5
+# sessions the bench held SEVEN names -- BAC, GDX, SOFI, XLF, NFLX, NVDA,
+# INTC -- and LOCKBOT is 0 for 8, so it benched every name it touched. At
+# roughly one trade a day it was removing names faster than they returned,
+# and only a handful ever clear the 5% spread gate in the first place.
+# NVDA, INTC and XLF are among the tightest books it can reach and all
+# three were locked out at once.
+#
+# Left alone that is not discipline, it is a slow walk to having nothing
+# left to trade. The rule was sized for a book that sometimes wins.
+#
+# At 1 it still fixes the thing that prompted it: options_scanner
+# re-entered the SOFI Sep-18 19/20 spread two days after those exact
+# strikes stopped out. A name is not re-bought on the next cycle or the
+# same session; it returns the following day.
+#
+# The measurement is unchanged -- blocked entries are still shadow-logged
+# as COOLDOWN_BLOCKED and still resolve against the registry floor, so
+# this remains a rule that can be convicted rather than a preference.
+OPTIONS_LOSS_COOLDOWN_SESSIONS = 1
 
 # What a contract may cost to OWN, as opposed to to trade.
 #

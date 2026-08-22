@@ -2162,8 +2162,25 @@ def _self_test() -> int:
     live = benched_underlyings()
     check("it reads the real ledger and finds the recent stops",
           len(live) > 0, f"{len(live)} benched")
-    check("SOFI is benched -- the trade that caused the directive",
-          "SOFI" in live, str(sorted(live)))
+    # This asserted "SOFI is benched" until 2026-08-21, which broke the
+    # moment the cooldown was cut from 5 sessions to 1 and SOFI aged out.
+    # The rule was fine; the test had pinned a symbol whose eligibility
+    # expires. It now asserts the actual contract -- every name that
+    # stopped out inside the window is benched -- which holds at any
+    # cooldown length.
+    import csv as _csv
+    _stops = [r for r in _csv.DictReader(
+        open(config.OPTIONS_COMPLETED_FILE, newline="", encoding="utf-8"))
+        if (r.get("exit_reason") or "").strip().upper() == "STOP_LOSS"]
+    _dates = sorted({r["exit_time"][:10] for r in _stops}, reverse=True)
+    _window = set(_dates[:config.OPTIONS_LOSS_COOLDOWN_SESSIONS])
+    _should = {r["underlying"].upper() for r in _stops
+               if r["exit_time"][:10] in _window}
+
+    check("every name that stopped out inside the window is benched",
+          _should <= set(live), f"missing {_should - set(live)}")
+    check("and nothing outside the window is",
+          set(live) <= _should, f"extra {set(live) - _should}")
     check("it keys on the UNDERLYING, not the contract symbol",
           all(len(k) <= 6 and not any(c.isdigit() for c in k) for k in live),
           str(sorted(live)))
