@@ -329,7 +329,49 @@ def current_exit_value(
             # Not a loss -- a crossed or stale book. Do not act on it.
             return None
 
-    return value * CONTRACT_MULTIPLIER
+    # Rounded for the same reason every other option dollar field is
+    # rounded at its constructor (channel 528499d2, the 56.00000000000001
+    # case): 0.60 - 0.32 is 0.27999999999999997 in binary floating point,
+    # and an exit value carrying that drift is compared against stop
+    # bands, divided into returns, and priced into orders. Rounding here
+    # is what lets the decision and the order be provably equal rather
+    # than equal to within a rounding error.
+    return round(value * CONTRACT_MULTIPLIER, 2)
+
+
+def exit_value_per_share(
+    position: OptionPosition,
+    quotes: dict[str, Any],
+) -> float | None:
+    """The same valuation as current_exit_value, per share rather than in
+    dollars. None means the book cannot be trusted.
+
+    THIS EXISTS SO THE DECISION AND THE ORDER CANNOT DISAGREE.
+
+    Until 2026-08-21 build_close_request computed its own net credit as
+    max(long_bid - short_ask, 0.01), while current_exit_value returned
+    None for exactly the same negative input on the grounds that a crossed
+    or stale book is not a price. So the STOP DECISION refused to act on a
+    broken quote and the ORDER PRICE clamped it to a penny and sold
+    anyway.
+
+    It could not fire on a price-based exit, because a None valuation
+    holds the position. It could fire on a TIME-based one -- NEAR_EXPIRY
+    and MAX_HOLD are checked before price precisely so they work without a
+    quote -- and would then have submitted a spread worth real money as a
+    $0.01 credit.
+
+    This is the third instance of one quantity computed in two places,
+    after the debit cap (three) and the entry limit (two, found the same
+    day). The fix is the same each time: compute it once.
+    """
+
+    value = current_exit_value(position, quotes)
+
+    if value is None:
+        return None
+
+    return round(value / CONTRACT_MULTIPLIER, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -647,8 +689,18 @@ def build_close_request(
             f"No usable quote for {position.short_symbol}; cannot price an exit."
         )
 
-    _, short_ask = short_quote
-    net_credit = max(long_bid - short_ask, 0.01)
+    # The SAME valuation the stop decision used. A book this function
+    # cannot trust is one it must not price against -- raising here puts
+    # the position on the existing retry path, alongside a missing quote,
+    # rather than selling it for a penny.
+    net_credit = exit_value_per_share(position, quotes)
+
+    if net_credit is None or net_credit <= 0:
+        raise ValueError(
+            f"{position.underlying}: the book prices this exit at or below "
+            "zero, which cannot be true for a debit spread. Refusing to "
+            "sell into a crossed or stale quote; will retry next cycle."
+        )
 
     return LimitOrderRequest(
         qty=position.contracts,
@@ -2383,6 +2435,54 @@ def _self_test() -> int:
             config.OPTIONS_RISK_STATE_FILE = real_path
 
     print()
+    print("The exit order cannot price what the stop refused to trust")
+
+    # The 2026-08-21 audit finding. current_exit_value returned None on a
+    # crossed book; build_close_request clamped the same input to 0.01 and
+    # sold. A time exit fires without a quote by design, so this could
+    # have sent a spread worth real money out as a penny credit.
+    def _q(bid, ask):
+        return type("Q", (), {"bid_price": bid, "ask_price": ask,
+                              "bid": bid, "ask": ask})()
+
+    broken = OptionPosition(
+        position_id="t", underlying="TEST", strategy="BULL_CALL_SPREAD",
+        long_symbol="L", short_symbol="S", contracts=1, entry_debit=32.0,
+        entry_time="2026-08-20T14:00:00+00:00", expiration="2026-09-11",
+    )
+    # A crossed book: the long bids BELOW what the short asks.
+    crossed = {"L": _q(0.20, 0.24), "S": _q(0.30, 0.34)}
+
+    check("a crossed book values as None, not as a number",
+          current_exit_value(broken, crossed) is None)
+    check("and per-share agrees with it",
+          exit_value_per_share(broken, crossed) is None)
+
+    try:
+        build_close_request(broken, crossed)
+        priced = True
+    except ValueError:
+        priced = False
+
+    check("the ORDER refuses to price it too, instead of selling at 0.01",
+          not priced)
+
+    healthy = {"L": _q(0.60, 0.66), "S": _q(0.28, 0.32)}
+    check("a healthy book still values",
+          current_exit_value(healthy and broken, healthy) == 28.0,
+          str(current_exit_value(broken, healthy)))
+
+    req = build_close_request(broken, healthy)
+    check("and the order prices at exactly that value per share",
+          float(req.limit_price) == 0.28, str(req.limit_price))
+    # Rounded on the way back up, because 0.28 * 100 is 28.000000000000004
+    # in binary floating point -- the test's own arithmetic, not the
+    # system's. The invariant being asserted is that one valuation feeds
+    # both, and it does.
+    check("so the decision and the order can never disagree",
+          round(float(req.limit_price) * CONTRACT_MULTIPLIER, 2)
+          == current_exit_value(broken, healthy))
+
     print("A cancel REQUEST is not a cancelled order")
 
     # LOCKBOT item 50d2f36d. The XLF spread was abandoned at 14:30:24 on a
