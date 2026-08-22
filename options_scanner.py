@@ -834,6 +834,7 @@ def build_open_request(
     long_quote: contracts.ContractQuote,
     short_quote: contracts.ContractQuote | None,
     quantity: int,
+    limit_price: float,
 ) -> Any:
     """
     Build the entry order.
@@ -842,6 +843,28 @@ def build_open_request(
     wide enough that a market order can fill well outside the quote, and
     a bad entry fill is unrecoverable -- it raises the break-even for the
     whole life of the trade.
+
+    THE PRICE IS PASSED IN, NEVER RECOMPUTED HERE.
+
+    Until 2026-08-21 this called entry_limit_price itself, without the mid,
+    so it fell back to touch x 1.03 while the caller had already computed
+    an f=0.5 price. LOCKBOT therefore SUBMITTED at the offer plus a buffer
+    and RECORDED the midpoint -- two prices for one order.
+
+    It was invisible in every log because the logs carried the recorded
+    number. It was caught by comparing fills against it: four of five
+    filled ABOVE their recorded limit, which a limit order cannot do.
+    SOFI 0.31 recorded and 0.33 paid, NFLX 0.41 and 0.46, BAC 0.39 and
+    0.41, GDX 0.33 and 0.37 -- 5% to 12% more than the books say.
+
+    Every consequence followed from the same root: the entry-limit
+    fraction never reached the broker, entry_debit understated what was
+    paid, and the full-debit cap was tested against a number lower than
+    the one submitted, so the ceiling it enforced was not the ceiling it
+    reported.
+
+    This is the debit-cap defect again -- one quantity computed in two
+    places -- and the fix is the same: compute it once, pass it down.
 
     The limit sits a small buffer *above* the ask rather than exactly on
     it. Two PBR calls on 2026-07-30 were priced at the exact ask and never
@@ -869,17 +892,15 @@ def build_open_request(
             side=OrderSide.BUY,
             type="limit",
             time_in_force=TimeInForce.DAY,
-            limit_price=entry_limit_price(long_quote.ask),
+            limit_price=round(limit_price, 2),
             position_intent=PositionIntent.BUY_TO_OPEN,
         )
-
-    net_debit = long_quote.ask - short_quote.bid
 
     return LimitOrderRequest(
         qty=quantity,
         order_class=OrderClass.MLEG,
         time_in_force=TimeInForce.DAY,
-        limit_price=entry_limit_price(max(net_debit, 0.01)),
+        limit_price=round(max(limit_price, 0.01), 2),
         legs=[
             OptionLegRequest(
                 symbol=long_quote.symbol,
@@ -1743,6 +1764,9 @@ def run_options_scanner() -> OptionsScannerSummary:
                     long_quote=long_quote,
                     short_quote=short_quote,
                     quantity=config.OPTIONS_MAX_CONTRACTS_PER_POSITION,
+                    # The SAME number the cap was tested against and the
+                    # attempt log recorded. One price per order.
+                    limit_price=limit_per_contract,
                 )
 
                 order = trading_client.submit_order(order_data=request)
@@ -1940,6 +1964,17 @@ def _disabled_benched() -> dict:
         return benched_underlyings()
     finally:
         config.OPTIONS_LOSS_COOLDOWN_SESSIONS = original
+
+
+def _src_of(fn: Any) -> str:
+    """Source of one function, for tests that assert on structure."""
+
+    import inspect
+
+    try:
+        return inspect.getsource(fn)
+    except (OSError, TypeError):
+        return ""
 
 
 def _self_test() -> int:
@@ -2275,6 +2310,50 @@ def _self_test() -> int:
         _sh.rmtree(_dir, ignore_errors=True)
 
     print()
+    print("The submitted price IS the recorded price")
+
+    # On 2026-08-21 four of five fills came in ABOVE their recorded limit,
+    # which a limit order cannot do. build_open_request was pricing the
+    # order itself, without the mid, while the caller had already computed
+    # an f=0.5 price -- so LOCKBOT submitted at the offer plus a buffer and
+    # recorded the midpoint. Same shape as the debit cap: one quantity in
+    # two places.
+    class _Q:
+        def __init__(self, symbol, bid, ask):
+            self.symbol, self.bid, self.ask = symbol, bid, ask
+            self.expiration = datetime(2026, 9, 18).date()
+
+        @property
+        def mid(self):
+            return (self.bid + self.ask) / 2
+
+    _long, _short = _Q("L", 0.60, 0.70), _Q("S", 0.30, 0.36)
+
+    single = build_open_request(strategy="LONG_CALL", long_quote=_long,
+                                short_quote=None, quantity=1,
+                                limit_price=0.65)
+    check("a single leg submits exactly the price it was given",
+          float(single.limit_price) == 0.65, str(single.limit_price))
+    check("and NOT the touch plus a buffer",
+          float(single.limit_price) != round(_long.ask * 1.03, 2))
+
+    spread = build_open_request(strategy="BULL_CALL_SPREAD", long_quote=_long,
+                                short_quote=_short, quantity=1,
+                                limit_price=0.37)
+    check("a spread submits exactly the price it was given",
+          float(spread.limit_price) == 0.37, str(spread.limit_price))
+    check("and NOT long ask minus short bid plus a buffer",
+          float(spread.limit_price)
+          != round((_long.ask - _short.bid) * 1.03, 2))
+
+    check("build_open_request no longer prices anything itself",
+          "entry_limit_price(" not in _src_of(build_open_request))
+    check("a floor still stops a zero or negative limit",
+          float(build_open_request(
+              strategy="BULL_CALL_SPREAD", long_quote=_long,
+              short_quote=_short, quantity=1,
+              limit_price=-5.0).limit_price) == 0.01)
+
     print("Entries price inside the spread, not over the offer")
 
     _f = config.OPTIONS_ENTRY_LIMIT_FRACTION
