@@ -730,6 +730,64 @@ def run_rule_review() -> None:
         print(f"\nRule review failed: {type(error).__name__}: {error}")
 
 
+def run_reconciliation() -> None:
+    """Compare LOCKBOT's books against the broker, once a day.
+
+    The owner asks "how did we do today?" and acts on the answer. Four
+    times in the week of 2026-08-14 the answer was wrong -- up $2.95 on a
+    day he was down $23, a $23 loss booked as breakeven, trade costs 5-12%
+    understated, a position reported as protected while it had no stop.
+    Each was found late, by hand, and each had a broker record that
+    disagreed with the books the whole time.
+
+    A CRITICAL disagreement marks the module DEGRADED, because
+    module_health is read unconditionally by every session while a log
+    line is not.
+
+    Reports only. A reconciler that repairs the books can hide the defect
+    it exists to expose.
+    """
+
+    try:
+        import reconcile
+    except Exception as error:                          # noqa: BLE001
+        print(f"\nReconciliation unavailable: {type(error).__name__}: {error}")
+        return
+
+    try:
+        result = reconcile.reconcile()
+
+        print()
+        reconcile.report(result)
+
+        if result.agree:
+            return
+
+        from system_heartbeat import mark_module_degraded
+
+        worst = result.critical or result.disagreements
+
+        mark_module_degraded(
+            "RECONCILIATION",
+            message=result.summary(),
+            error="",
+        )
+
+        from notifications import send_smart_notification
+
+        send_smart_notification(
+            symbol="BOOKS",
+            event_type="RECONCILIATION",
+            title="LOCKBOT: the books and the broker disagree",
+            message=(str(worst[0]) + ("" if len(worst) == 1 else
+                     f"\n\n...and {len(worst) - 1} more")),
+            reason=result.fingerprint(),
+            cooldown_minutes=1440,
+        )
+    except Exception as error:                          # noqa: BLE001
+        print(f"\nReconciliation failed: {type(error).__name__}: {error}")
+
+
 def main() -> None:
     """Run the complete LOCKBOT health inspection."""
 
@@ -763,6 +821,7 @@ def main() -> None:
 
     run_config_sweep()
     run_rule_review()
+    run_reconciliation()
 
 
 def _self_test() -> int:
