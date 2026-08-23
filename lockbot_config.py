@@ -1115,7 +1115,21 @@ OPTIONS_MAX_TERM_INVERSION = 1.10
 # is cheaper but needs a bigger move to pay. The DTE window keeps
 # LOCKBOT away from the last two weeks of an option's life, where
 # theta decay accelerates sharply.
-OPTIONS_TARGET_DELTA_MIN = 0.35
+# Lowered from 0.35 to 0.20 on 2026-08-23, and the reason is AFFORDABILITY,
+# not signal. Say so plainly rather than dressing it as a view.
+#
+# It moves with OPTIONS_ALLOW_SPREADS going False -- the two are one
+# decision. With verticals off and a $38.34 ceiling, the 0.35 floor left
+# exactly THREE affordable single contracts across 31,304 sampled quotes
+# (BITO $25, SCHD $28, NOK $35). That is not cheap-option trading, it is
+# no trading. At 0.20 the pool is 13 contracts across 7 symbols -- still
+# thin, roughly one entry a day.
+#
+# 0.10 was rejected by LOCKBOT as a lottery ticket (channel 5acfe857).
+# The theta objection to low delta -- that a cheap contract is nearly all
+# extrinsic and bleeds fastest as a fraction of premium -- applies to
+# HOLDING INTO EXPIRY, which the 10-day and 14-DTE exits already forbid.
+OPTIONS_TARGET_DELTA_MIN = 0.20
 OPTIONS_TARGET_DELTA_MAX = 0.60
 OPTIONS_MIN_DTE = 21
 OPTIONS_MAX_DTE = 45
@@ -1186,15 +1200,54 @@ OPTIONS_MIN_DTE_EXIT = 14
 # and decay less, at the cost of a capped payoff — the right trade
 # when the trend is real but weak, or when volatility is high and
 # outright premium is expensive.
-OPTIONS_ALLOW_SPREADS = True
+# Turned OFF 2026-08-23 on the owner's directive, stated twice: "I do not
+# want the spreads to be a thing... buy premium cheap options contracts
+# until we can afford the more expensive stuff."
+#
+# THE ARGUMENT THAT CARRIES IT, and it is his: a vertical crosses the
+# bid-ask on TWO legs against a NET debit that is the difference of two
+# premiums, so friction as a fraction of committed capital is amplified
+# beyond 2x. On a book where measured spread drag is 5.88x the gross
+# modelled result, a structure that multiplies the dominant cost is a
+# real problem.
+#
+# THE ARGUMENT THAT DOES NOT, recorded because it is the tempting one and
+# LOCKBOT refused it explicitly: the 0-for-8 record on spreads is NOT
+# evidence against the structure. All eight died on the -35% software
+# stop or on gap-through -- NVDA and INTC on the first cycle after an
+# open, GDX at -83.8% inside ten minutes -- and that mechanism is
+# indifferent to whether the position was one leg or two. Citing the
+# losing streak as support would be attributing to the structure a death
+# that had nothing to do with it.
+#
+# WHAT IT COSTS. Dollar loss per trade falls, $25-38 against $155. But
+# expect MORE FREQUENT stop-outs, because premium volatility is higher at
+# low delta, and WORSE percentage overshoot, because a one-cent tick is a
+# larger fraction of a $25 contract than of a $155 one. Smaller losses,
+# more of them, higher variance, still bounded at the debit.
+#
+# REVERSIBILITY IS PART OF THE DECISION, in the owner's own framing --
+# "until we can afford the more expensive stuff". Re-enabling is his call
+# at an equity level he names. This is not doctrine and must not harden
+# into it.
+OPTIONS_ALLOW_SPREADS = False
 OPTIONS_SPREAD_WIDTH_STRIKES = 1
 
+# Remapped to single legs on 2026-08-23 when OPTIONS_ALLOW_SPREADS went
+# False. validate_configuration refused the half-done version -- three
+# regimes still pointed at vertical strategies that could no longer be
+# built -- which is the check earning its keep.
+#
+# The weak-trend and high-volatility regimes used verticals precisely
+# BECAUSE they were cheaper, so they are the regimes that suffer most from
+# the change. Their contracts must now clear the debit ceiling outright,
+# and at $38 many will not. Expect the funnel to narrow, not widen.
 OPTIONS_REGIME_STRATEGY = {
     "STRONG_UPTREND": "LONG_CALL",
     "STRONG_DOWNTREND": "LONG_PUT",
-    "WEAK_UPTREND": "BULL_CALL_SPREAD",
-    "WEAK_DOWNTREND": "BEAR_PUT_SPREAD",
-    "HIGH_VOLATILITY": "BULL_CALL_SPREAD",
+    "WEAK_UPTREND": "LONG_CALL",
+    "WEAK_DOWNTREND": "LONG_PUT",
+    "HIGH_VOLATILITY": "LONG_CALL",
     "RANGING": "NONE",
     "UNKNOWN": "NONE",
 }

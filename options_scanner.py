@@ -1802,6 +1802,62 @@ def run_options_scanner() -> OptionsScannerSummary:
                 note=strategy,
             )
 
+            # THE SHADOW ARM, and it is what makes this change falsifiable
+            # rather than a preference (LOCKBOT's condition, channel
+            # 5acfe857). Verticals were switched off on 2026-08-23 on the
+            # owner's directive. The vertical SELECTOR keeps running, and
+            # every time a single leg is taken we record the spread that
+            # would have been taken instead, on the same chain, in the same
+            # cycle.
+            #
+            # Paired, not era-versus-era. Comparing "singles this month"
+            # against "spreads last month" compares two different markets;
+            # comparing the two structures chosen from one chain at one
+            # instant compares the structures. Without this the verdict at
+            # n>=30 would be uninterpretable.
+            if not config.OPTIONS_ALLOW_SPREADS:
+                try:
+                    pair, _ = contracts.select_vertical_spread(
+                        quotes,
+                        underlying_price=candidate["price"],
+                        contract_type=contract_type,
+                        width_strikes=config.OPTIONS_SPREAD_WIDTH_STRIKES,
+                        **gates,
+                    )
+
+                    if pair is not None:
+                        shadow_long, shadow_short = pair
+                        shadow_debit = (
+                            shadow_long.ask - shadow_short.bid
+                        ) * CONTRACT_MULTIPLIER
+
+                        append_shadow_row({
+                            **shadow_row,
+                            "long_symbol": shadow_long.symbol,
+                            "short_symbol": shadow_short.symbol,
+                            "debit": f"{shadow_debit:.2f}",
+                            "delta": (f"{shadow_long.delta:.4f}"
+                                      if shadow_long.delta is not None else ""),
+                            "action": "SPREAD_NOT_TAKEN",
+                            "reason": (
+                                f"single taken at ${debit:.2f}; the vertical "
+                                f"would have cost ${shadow_debit:.2f}"
+                            ),
+                            "rule_param": f"delta>={config.OPTIONS_TARGET_DELTA_MIN}",
+                        })
+                    else:
+                        append_shadow_row({
+                            **shadow_row,
+                            "action": "SPREAD_NOT_TAKEN",
+                            "reason": ("no vertical was available on this "
+                                       "chain, so the single had no "
+                                       "counterfactual"),
+                            "rule_param": f"delta>={config.OPTIONS_TARGET_DELTA_MIN}",
+                        })
+                except Exception as shadow_error:       # noqa: BLE001
+                    print(f"  shadow vertical not logged: "
+                          f"{type(shadow_error).__name__}: {shadow_error}")
+
             position_id = str(uuid.uuid4())
 
             positions[position_id] = OptionPosition(
@@ -1997,13 +2053,33 @@ def _self_test() -> int:
     strategy, _ = choose_strategy("SELL_SHORT", "STRONG_DOWNTREND")
     check("strong downtrend buys puts", strategy == "LONG_PUT", strategy)
 
-    strategy, _ = choose_strategy("BUY_LONG", "WEAK_UPTREND")
-    check("weak uptrend uses a call spread",
-          strategy == "BULL_CALL_SPREAD", strategy)
+    # These asserted BULL_CALL_SPREAD and BEAR_PUT_SPREAD by name until
+    # 2026-08-23, when OPTIONS_ALLOW_SPREADS went False and the regime map
+    # was remapped to single legs. The strategy was working correctly; the
+    # tests had pinned a config value. Same fault as the "SOFI is benched"
+    # check on 08-21 -- a test that fails when a setting changes was
+    # testing the setting, not the code.
+    #
+    # The contract that holds at ANY configuration: a bullish regime buys
+    # calls and a bearish one buys puts, and the strategy chosen must be
+    # buildable under the current spread permission.
+    for regime, want_calls in (("WEAK_UPTREND", True),
+                               ("HIGH_VOLATILITY", True),
+                               ("WEAK_DOWNTREND", False)):
+        side = "BUY_LONG" if want_calls else "SELL_SHORT"
+        strategy, _ = choose_strategy(side, regime)
 
-    strategy, _ = choose_strategy("SELL_SHORT", "WEAK_DOWNTREND")
-    check("weak downtrend uses a put spread",
-          strategy == "BEAR_PUT_SPREAD", strategy)
+        if strategy == "NONE":
+            continue
+
+        check(f"{regime} takes the right direction",
+              STRATEGY_CONTRACT_TYPE[strategy] == ("call" if want_calls
+                                                   else "put"),
+              strategy)
+        check(f"{regime} picks a structure that can be built",
+              config.OPTIONS_ALLOW_SPREADS
+              or strategy not in SPREAD_STRATEGIES,
+              f"{strategy} with spreads={config.OPTIONS_ALLOW_SPREADS}")
 
     strategy, _ = choose_strategy("BUY_LONG", "RANGING")
     check("ranging is not traded", strategy == "NONE", strategy)

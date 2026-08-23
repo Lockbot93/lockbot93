@@ -191,6 +191,51 @@ REGISTRY: list[dict[str, Any]] = [
             "before the rule saw a strike."
         ),
     },
+    {
+        "rule_id": "single_legs_only",
+        "setting": "OPTIONS_ALLOW_SPREADS",
+        "mechanism": (
+            "Verticals off, single legs only, delta floor lowered to 0.20 "
+            "so anything is affordable at a $38 ceiling. ONE rule: the "
+            "delta move is forced by the structure change and their "
+            "effects are inseparable in the trade population."
+        ),
+        "adopted_at": "2026-08-23",
+        "authority": "LOCKBOT, channel 5acfe857, on owner directive",
+        "basis": "directive",
+        "power_note": (
+            "The friction argument is sound -- a vertical crosses the "
+            "bid-ask twice against a net debit, amplifying the dominant "
+            "measured cost beyond 2x. The 0-for-8 spread record is NOT "
+            "support and must not be cited as such: all eight died on the "
+            "-35% stop or on gap-through, a mechanism indifferent to "
+            "structure. The delta floor is affordability-forced, not "
+            "signal-derived."
+        ),
+        "metric_source": (
+            "options_completed_trades.csv, single-leg trades, paired "
+            "against action=SPREAD_NOT_TAKEN rows in the shadow log"
+        ),
+        "metric": (
+            "mean realised return-on-debit per closed single-leg trade, "
+            "PAIRED against the vertical that would have been taken on the "
+            "same chain in the same cycle. Era-versus-era comparison is "
+            "void -- it compares two markets, not two structures."
+        ),
+        "floor_n": 30,
+        "resolution": 0.20,
+        "verdict_rule": (
+            "mean <= -20% of debit at n >= 30 closed singles is "
+            "COSTING_MONEY. MEASUREMENT_STALLED if fewer than 30 after 40 "
+            "sessions."
+        ),
+        "reversibility": (
+            "The owner's own framing is 'until we can afford the more "
+            "expensive stuff'. Re-enabling verticals is his call at an "
+            "equity level he names. This is not doctrine and must not "
+            "harden into one."
+        ),
+    },
 ]
 
 # Behavioural rules that must appear in the registry or be reported as
@@ -200,6 +245,7 @@ BEHAVIOURAL_SETTINGS = [
     "OPTIONS_LOSS_COOLDOWN_SESSIONS",
     "OPTIONS_ENTRY_LIMIT_FRACTION",
     "OPTIONS_STOP_CONFIRM_CYCLES",
+    "OPTIONS_ALLOW_SPREADS",
 ]
 
 
@@ -491,10 +537,66 @@ def review_stop_confirm(entry: dict[str, Any]) -> RuleReview:
     return out
 
 
+def review_single_legs(entry: dict[str, Any]) -> RuleReview:
+    """Are single legs doing better than the spreads they replaced?"""
+
+    out = RuleReview(entry["rule_id"], entry["setting"], ACCUMULATING,
+                     floor_n=entry["floor_n"], basis=entry["basis"])
+
+    if getattr(config, entry["setting"], True):
+        out.status = NEUTRAL_ON_DIRECTIVE
+        out.detail = "verticals are enabled again, so nothing to judge"
+        return out
+
+    rows = _rows(config.OPTIONS_COMPLETED_FILE)
+    singles = [r for r in rows if not (r.get("short_symbol") or "").strip()
+               and (r.get("exit_time") or "") >= entry["adopted_at"]]
+
+    returns = []
+    for row in singles:
+        debit = _as_float(row.get("entry_debit"))
+        pnl = _as_float(row.get("profit_loss"))
+
+        if debit and debit > 0 and pnl is not None:
+            returns.append(pnl / debit)
+
+    out.n = len(returns)
+
+    # The paired counterfactual. Without it the verdict is era-vs-era,
+    # which LOCKBOT ruled void.
+    shadowed = sum(1 for r in _rows(config.OPTIONS_SHADOW_FILE)
+                   if (r.get("action") or "") == "SPREAD_NOT_TAKEN")
+
+    if out.n < out.floor_n:
+        out.detail = (
+            f"{out.needs} more closed singles before this can be judged"
+            + (f"; {shadowed} paired vertical(s) shadowed so far"
+               if shadowed else
+               "; NO paired verticals shadowed yet -- the comparison arm is "
+               "not producing")
+        )
+        return out
+
+    out.value = statistics.mean(returns)
+
+    if out.value <= -entry["resolution"]:
+        out.status = COSTING_MONEY
+        out.detail = (
+            f"single legs averaged {out.value:+.1%} of debit across "
+            f"{out.n} closed trades."
+        )
+    else:
+        out.status = WORKING
+        out.detail = f"single legs averaged {out.value:+.1%} of debit."
+
+    return out
+
+
 REVIEWERS = {
     "options_loss_cooldown": review_cooldown,
     "entry_limit_fraction": review_entry_fraction,
     "stop_confirm_cycles": review_stop_confirm,
+    "single_legs_only": review_single_legs,
 }
 
 
@@ -697,8 +799,15 @@ def _self_test() -> int:
 
     print("\nAgainst the real project")
     live = run_review()
-    check("all three live rules are reviewed", len(live.rules) == 3,
-          str(len(live.rules)))
+    # Was "all three" until a fourth rule was registered on 2026-08-23.
+    # Counting registry entries by hand is a test that breaks every time
+    # the registry does its job. It now asserts the contract: every
+    # registered rule has a reviewer and produces a review.
+    check("every registered rule is reviewed",
+          len(live.rules) == len(REGISTRY), f"{len(live.rules)}/{len(REGISTRY)}")
+    check("and every entry has a reviewer wired",
+          all(e["rule_id"] in REVIEWERS for e in REGISTRY),
+          str([e["rule_id"] for e in REGISTRY if e["rule_id"] not in REVIEWERS]))
     check("nothing is judgeable yet, which is correct at n=0",
           all(r.status in (ACCUMULATING, NEUTRAL_ON_DIRECTIVE,
                            MEASUREMENT_STALLED) for r in live.rules),
