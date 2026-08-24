@@ -279,36 +279,39 @@ def check_cash_against_journal(client: Any, out: Reconciliation) -> None:
 
     moved = equity - previous
 
-    # WHICH SESSION DOES THAT MOVE BELONG TO?
+    # THIS CHECK ONLY RUNS WHILE THE MARKET IS OPEN, and the reason is two
+    # false positives in two days.
     #
-    # Not necessarily today. last_equity is the broker's previous close and
-    # it does not roll while the market is shut, so on a Saturday the move
-    # still describes Friday. Comparing it against today's (empty) journal
-    # reported a $52 discrepancy on the first run of this module -- a clean
-    # false positive, and precisely the noise that teaches a reader to skip
-    # the report. The check is worth nothing if it cries wolf on a weekend.
+    # First it reported $52 unexplained on a Saturday, because last_equity
+    # does not roll while the market is shut, so the move still described
+    # Friday while the journal compared against it was today's and empty.
+    # I attributed the move to the last session with trades instead.
     #
-    # So: the move is attributed to the most recent session that actually
-    # has journalled trades, unless the market is open now, in which case
-    # it is today's by definition.
-    rows = _rows(config.OPTIONS_COMPLETED_FILE)
-    dates = sorted({(r.get("exit_time") or "")[:10] for r in rows
-                    if (r.get("exit_time") or "").strip()}, reverse=True)
-
-    today = datetime.now(timezone.utc).date().isoformat()
-
+    # That was too clever. By Sunday last_equity HAD rolled, so the move
+    # was an $8 mark adjustment belonging to no trading session at all,
+    # while the attributed journal still held Friday's -$51. The check
+    # reported a $51 discrepancy that did not exist, for the second time.
+    #
+    # The comparison is only well posed when both sides describe the same
+    # period, and that is only guaranteed intraday: equity minus
+    # last_equity is unambiguously today's move while today is happening.
+    # Outside a session there is no honest pairing, and a check that cries
+    # wolf twice in two days is worse than no check -- it teaches the
+    # reader to skip the report, which is how the untracked-position alert
+    # went unseen for five and a half hours.
     try:
-        market_open = bool(client.get_clock().is_open)
+        if not client.get_clock().is_open:
+            out.notes.append(
+                "market closed, so the equity move and the journal cover "
+                "different periods -- this check runs intraday only")
+            return
     except Exception:                                   # noqa: BLE001
-        market_open = False
+        out.notes.append("could not read the market clock; skipping the "
+                         "cash check rather than guessing the period")
+        return
 
-    if market_open or today in dates or not dates:
-        session = today
-    else:
-        session = dates[0]
-        out.notes.append(
-            f"market closed; attributing the equity move to {session}, "
-            "the last session with trades")
+    session = datetime.now(timezone.utc).date().isoformat()
+    rows = _rows(config.OPTIONS_COMPLETED_FILE)
 
     realised = sum(
         _f(r.get("profit_loss")) or 0.0
