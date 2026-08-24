@@ -293,6 +293,20 @@ class Review:
         return "|".join(parts)
 
 
+def _as_float(value: Any) -> float | None:
+    """A number, or None. Never 0.0 for unparseable input.
+
+    The distinction is the whole of the "a default value is a claim"
+    lesson: a debit of 0.0 divides a return to infinity, and a P&L of 0.0
+    enters a verdict mean as a breakeven that never happened.
+    """
+
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _rows(path: Path) -> list[dict[str, str]]:
     try:
         with open(path, newline="", encoding="utf-8") as handle:
@@ -793,9 +807,22 @@ def _self_test() -> int:
     check("every blocked row on disk carries a cohort",
           all((r.get("rule_param") or "").strip() for r in _blocked),
           f"{len(_blocked)} rows")
-    check("tagged with the parameter in force when written",
-          all(r.get("rule_param") == "5" for r in _blocked),
-          str([r.get("rule_param") for r in _blocked]))
+    # Asserted every row was tagged "5" until 2026-08-24, when the cooldown
+    # moved to 1 and new rows correctly carried "1". The cohort system was
+    # doing exactly its job and the test called it a failure -- the fourth
+    # check this week to pin a configuration value instead of a contract.
+    #
+    # What must actually hold at any point: every row carries a tag, every
+    # tag is a real parameter value, and the newest row carries whatever
+    # the setting holds now.
+    check("every tag is a real parameter value",
+          all(str(r.get("rule_param", "")).strip().isdigit() for r in _blocked),
+          str(sorted({r.get("rule_param") for r in _blocked})))
+    check("and the newest row carries the setting in force today",
+          not _blocked or _blocked[-1].get("rule_param")
+          == str(config.OPTIONS_LOSS_COOLDOWN_SESSIONS),
+          f"{_blocked[-1].get('rule_param') if _blocked else None} vs "
+          f"{config.OPTIONS_LOSS_COOLDOWN_SESSIONS}")
 
     print("\nAgainst the real project")
     live = run_review()
@@ -808,10 +835,21 @@ def _self_test() -> int:
     check("and every entry has a reviewer wired",
           all(e["rule_id"] in REVIEWERS for e in REGISTRY),
           str([e["rule_id"] for e in REGISTRY if e["rule_id"] not in REVIEWERS]))
+    # MEASUREMENT_STALLED was accepted here until 2026-08-24, and that
+    # masked a live crash: review_single_legs raised NameError on a missing
+    # helper, the reviewer caught it and returned STALLED, and this check
+    # read STALLED as a legitimate "not yet judgeable" state. The scorecard
+    # reported a broken rule as a quiet one for a full day.
+    #
+    # A crash is not a verdict. STALLED must be reached by evidence failing
+    # to arrive, never by the reviewer failing to run.
     check("nothing is judgeable yet, which is correct at n=0",
-          all(r.status in (ACCUMULATING, NEUTRAL_ON_DIRECTIVE,
-                           MEASUREMENT_STALLED) for r in live.rules),
+          all(r.status in (ACCUMULATING, NEUTRAL_ON_DIRECTIVE)
+              for r in live.rules),
           str([(r.setting, r.status) for r in live.rules]))
+    check("and no reviewer crashed on the way to saying so",
+          not any("review failed" in r.detail for r in live.rules),
+          str([r.detail for r in live.rules if "review failed" in r.detail]))
     check("the orphan it found on day one is now registered",
           "OPTIONS_STOP_CONFIRM_CYCLES" not in live.unregistered,
           str(live.unregistered))
