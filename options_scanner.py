@@ -1874,6 +1874,11 @@ def run_options_scanner() -> OptionsScannerSummary:
                 confidence=candidate["score"],
                 entry_order_id=str(order.id),
                 entry_filled=False,
+                # Captured at entry, from the leg actually bought. This is
+                # the only moment it is knowable -- the chain moves, and a
+                # delta looked up later is a different number.
+                entry_delta=(abs(long_quote.delta)
+                             if long_quote.delta is not None else None),
                 paper_trade=config.PAPER_TRADING,
             )
 

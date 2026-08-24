@@ -102,6 +102,19 @@ COMPLETED_COLUMNS = [
     "market_regime",
     "confidence",
     "paper_trade",
+    # Added 2026-08-23. Without it the delta-scaled exit question cannot be
+    # asked at all, which LOCKBOT named as the prerequisite before rule 4
+    # of the owner's playbook could ever be pre-registered (channel
+    # a490c38b).
+    #
+    # WHY IT MATTERS RATHER THAN BEING BOOKKEEPING. Premium elasticity is
+    # delta x underlying / premium, so a fixed +50%/-35% band is NOT a
+    # fixed band in underlying terms -- it tightens as delta falls.
+    # Dropping the floor from 0.35 to 0.20 tonight therefore moved the
+    # exits without anybody deciding to, and nothing recorded the delta
+    # each trade was taken at, so the effect would have been invisible in
+    # the record afterwards.
+    "entry_delta",
 ]
 
 # Exit reasons
@@ -134,6 +147,11 @@ class OptionPosition:
     highest_value: float = 0.0
     entry_order_id: str | None = None
     entry_filled: bool = False
+    # Delta of the long leg at entry. None when the feed omitted greeks,
+    # which happens routinely on the indicative feed -- never 0.0, because
+    # a delta of zero is a claim about the contract rather than an absence
+    # of data.
+    entry_delta: float | None = None
     # Consecutive cycles the stop condition has held. See decide_exit --
     # a single wide-book bid print is not evidence of a 35% loss.
     stop_strikes: int = 0
@@ -784,6 +802,10 @@ def record_completed_option_trade(
         "market_regime": position.market_regime,
         "confidence": position.confidence,
         "paper_trade": position.paper_trade,
+        # Blank rather than 0.0 when the feed gave no greeks. A zero delta
+        # would read as a real measurement and poison any later split on it.
+        "entry_delta": ("" if position.entry_delta is None
+                        else f"{position.entry_delta:.4f}"),
     }
 
     with OPTIONS_COMPLETED_FILE.open("a", newline="", encoding="utf-8") as handle:
@@ -2435,6 +2457,42 @@ def _self_test() -> int:
             config.OPTIONS_RISK_STATE_FILE = real_path
 
     print()
+    print("Entry delta is journaled, or the exit band cannot be questioned")
+
+    # LOCKBOT's prerequisite (channel a490c38b) before the delta-scaled
+    # exit question can ever be pre-registered. Premium elasticity is
+    # delta x underlying / premium, so +50/-35 is not a fixed band in
+    # underlying terms -- it tightened when the floor dropped 0.35 -> 0.20
+    # on 08-23, without anybody deciding to move it.
+    check("the journal carries entry_delta", "entry_delta" in COMPLETED_COLUMNS)
+
+    p_with = OptionPosition(
+        position_id="d1", underlying="T", strategy="LONG_CALL",
+        long_symbol="L", contracts=1, entry_debit=30.0,
+        entry_time="2026-08-24T14:00:00+00:00", expiration="2026-09-18",
+        entry_delta=0.2345)
+    p_without = OptionPosition(
+        position_id="d2", underlying="T", strategy="LONG_CALL",
+        long_symbol="L", contracts=1, entry_debit=30.0,
+        entry_time="2026-08-24T14:00:00+00:00", expiration="2026-09-18")
+
+    check("a position can carry it", p_with.entry_delta == 0.2345)
+    check("and defaults to None, never 0.0 -- a zero delta is a claim",
+          p_without.entry_delta is None, str(p_without.entry_delta))
+
+    src = Path(__file__).read_text(encoding="utf-8").split("def _self_test")[0]
+    check("a missing delta writes BLANK, not a number",
+          'else f"{position.entry_delta:.4f}"' in src
+          and '"" if position.entry_delta is None' in src)
+
+    try:
+        import options_scanner as _scanner
+        _s = Path(_scanner.__file__).read_text(encoding="utf-8")
+        check("the scanner captures it from the leg it actually bought",
+              "entry_delta=(abs(long_quote.delta)" in _s)
+    except Exception as error:                          # noqa: BLE001
+        check(f"options_scanner readable ({error})", False)
+
     print("The exit order cannot price what the stop refused to trust")
 
     # The 2026-08-21 audit finding. current_exit_value returned None on a
