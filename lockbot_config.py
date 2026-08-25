@@ -1317,6 +1317,39 @@ OPTIONS_REQUIRE_NONZERO_BID = True
 # OPTIONS_MIN_QUALITY, which has been left unset for the same reason.
 #
 # Registered in rule_registry so it can be judged rather than believed.
+# --- Option-implied skew, the first entry signal not derived from the
+# --- price bars. See PREREG_OPTION_SKEW.md, committed before any outcome.
+#
+# WHY: options_scanner has always taken direction from
+# market_scanner.detect_signal, measured 2026-08-05 at 32.9% / -0.01R
+# against random entry's 36.7% / +0.10R. The options book is a leveraged,
+# double-spread, theta-paying expression of a signal with no information,
+# which explains 0-for-9 without appealing to luck.
+#
+# WHAT REPLACES IT: OTM-put IV minus ATM-call IV, delta matched. Published
+# to predict returns cross-sectionally (Xing/Zhang/Zhao 2010), and largely
+# explained away as a stock-borrow-fee artifact by Muravyev/Pearson/Pollet
+# (JFE 2025) -- two thirds of it vanishes once borrow fees are charged or
+# high-fee names excluded. This account cannot short at all, so it takes
+# the LONG half only and requires easy_to_borrow, which is the same
+# exclusion that paper says removes the artifact.
+#
+# SHADOW UNTIL IT EARNS CAPITAL. Nothing enters on skew while this is
+# False; it computes, ranks and logs. The owner can set it True -- his
+# account, his call -- and the pre-registered bar does not move if he does.
+OPTIONS_SKEW_ENABLED = True
+OPTIONS_SKEW_LIVE = False
+
+# The stability gate. One reading of a 16-28% wide book that moves 8%
+# between polls is not a signal; the same lesson produced
+# OPTIONS_STOP_CONFIRM_CYCLES after an EWZ call exited at -8.1% against a
+# -35% stop on a single bad print. A name needs this many consecutive
+# SAME-SIGNED readings inside the drift band before it can be traded.
+OPTIONS_SKEW_MIN_READINGS = 3
+OPTIONS_SKEW_MAX_DRIFT = 0.05
+
+OPTIONS_SKEW_STATE_FILE = PROJECT_FOLDER / "options_skew_state.json"
+
 OPTIONS_MAX_IMPLIED_VOLATILITY = 1.00
 
 OPTIONS_TAKE_PROFIT_PERCENT = 0.50
