@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any
 
 import lockbot_config as config
+import underlying_stop_shadow
 
 
 MODULE_NAME = "OPTIONS_MANAGER"
@@ -1616,6 +1617,36 @@ def run_options_manager() -> OptionsManagerSummary:
                     "Time-based exits will still be evaluated."
                 )
 
+        # ---- Underlying prices, for the shadow stop only.
+        #
+        # MEASUREMENT, NOT A DECISION. Nothing below reads these to exit
+        # anything; they feed underlying_stop_shadow, which writes a log
+        # and returns. Wrapped because a measurement must never be able to
+        # break the exit path -- if this fetch fails the stop still runs.
+        underlying_prices: dict[str, float] = {}
+        shadow_rows: list[dict] = []
+
+        try:
+            names = sorted({p.underlying for p in positions.values()
+                            if p.entry_filled and p.underlying})
+
+            if names:
+                from alpaca.data.historical.stock import StockHistoricalDataClient
+                from alpaca.data.requests import StockLatestTradeRequest
+
+                stock_client = StockHistoricalDataClient(api_key, secret_key)
+                trades = stock_client.get_stock_latest_trade(
+                    StockLatestTradeRequest(symbol_or_symbols=names))
+
+                for name, trade in (trades or {}).items():
+                    price = getattr(trade, "price", None)
+
+                    if price is not None and float(price) > 0:
+                        underlying_prices[name] = float(price)
+        except Exception as shadow_error:               # noqa: BLE001
+            print(f"  (shadow stop: no underlying prices this cycle — "
+                  f"{type(shadow_error).__name__}; exits are unaffected)")
+
         for position_id, position in list(positions.items()):
             if not position.entry_filled:
                 # The entry is still working. There is nothing to sell yet,
@@ -1652,6 +1683,25 @@ def run_options_manager() -> OptionsManagerSummary:
                 # log_strike_open for why state alone cannot carry it.
                 if strikes_before == 0 and position.stop_strikes == 1                         and value is not None:
                     log_strike_open(position, value)
+
+                # Record what the playbook stop would have said at this
+                # same instant, beside what the live stop said. Paired, so
+                # the two are never compared across different periods.
+                try:
+                    row = underlying_stop_shadow.observe(
+                        position,
+                        underlying_price=underlying_prices.get(
+                            position.underlying),
+                        current_value=value,
+                        buffer=config.OPTIONS_UNDERLYING_STOP_BUFFER,
+                        stop_loss_percent=config.OPTIONS_STOP_LOSS_PERCENT,
+                        now=now,
+                    )
+
+                    if row is not None:
+                        shadow_rows.append(row)
+                except Exception:                       # noqa: BLE001
+                    pass
 
                 label = f"{position.underlying} {position.strategy}"
 
@@ -1807,6 +1857,23 @@ def run_options_manager() -> OptionsManagerSummary:
                     f"{summary.slots_freed} slot(s) freed and available to "
                     "options_scanner.py this cycle."
                 )
+
+        # The shadow log is written AFTER every exit decision has been
+        # made and acted on, so a failure here cannot delay or prevent a
+        # stop. It is a record of what happened, not an input to it.
+        try:
+            written = underlying_stop_shadow.append(shadow_rows)
+
+            if written:
+                fired = sum(
+                    1 for row in shadow_rows
+                    if row.get("verdict") == underlying_stop_shadow.KEN_ONLY)
+                note = (f", {fired} where only the playbook stop fired"
+                        if fired else "")
+                print(f"  shadow stop: {written} observation(s) logged{note}")
+        except Exception as shadow_error:               # noqa: BLE001
+            print(f"  (shadow stop log failed: "
+                  f"{type(shadow_error).__name__}; exits were unaffected)")
 
         save_positions(positions)
         summary.tracked_after = len(positions)

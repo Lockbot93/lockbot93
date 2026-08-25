@@ -1273,6 +1273,24 @@ OPTIONS_TAKE_PROFIT_PERCENT = 0.50
 OPTIONS_STOP_LOSS_PERCENT = 0.35
 
 # Time-based exits. Both are theta protection, not signal logic.
+# Buffer for the SHADOW underlying stop (owner playbook Rule 7): a call
+# is stopped when the underlying trades below strike - this, a put when it
+# trades above strike + this.
+#
+# NOTHING EXITS ON THIS. underlying_stop_shadow only writes a log. It is
+# here because the live -35% premium stop is not behaving like a -35%
+# stop -- across nine closed trades it realised -47% on average, +12% past
+# its own level, worst +49% (GDX, twelve minutes). All nine died on the
+# stop; none timed out and none reached target.
+#
+# A percentage of PREMIUM and a distance on the UNDERLYING are different
+# triggers on different series, so this is worth measuring rather than
+# assuming. It is logged paired with the live stop at the same instant.
+#
+# $0.50 is the playbook's figure, adopted unchanged as a starting cohort.
+# Every row carries it in rule_param so a later change splits cleanly.
+OPTIONS_UNDERLYING_STOP_BUFFER = 0.50
+
 OPTIONS_MAX_HOLD_DAYS = 10
 OPTIONS_MIN_DTE_EXIT = 14
 

@@ -236,16 +236,87 @@ REGISTRY: list[dict[str, Any]] = [
             "harden into one."
         ),
     },
+    {
+        "rule_id": "underlying_stop_buffer",
+        "setting": "OPTIONS_UNDERLYING_STOP_BUFFER",
+        "mechanism": (
+            "SHADOW ONLY. Nothing exits on this. underlying_stop_shadow "
+            "records, once per position per cycle, whether the owner "
+            "playbook stop (underlying through strike -/+ $0.50) would "
+            "have fired, PAIRED with what the live -35% premium stop said "
+            "at the same instant."
+        ),
+        "adopted_at": "2026-08-24",
+        "authority": (
+            "owner playbook Rule 7; NOT ruled on by LOCKBOT, which was "
+            "offline (Anthropic balance empty) when this shipped"
+        ),
+        "basis": "evidence",
+        "power_note": (
+            "The live stop is not behaving like a -35% stop: across nine "
+            "closed trades it realised -47% mean, +12% past its own level, "
+            "worst +49% in twelve minutes. All nine died on the stop, none "
+            "timed out, none reached target. So this measures a DIFFERENT "
+            "trigger on a DIFFERENT series, not a re-tuning of the failing "
+            "one. Two deliberate departures from the playbook: it fires "
+            "same-session rather than next-session, because six of nine "
+            "deaths were inside 24 hours and a next-session rule sits "
+            "through exactly that gap; and it decides nothing at all until "
+            "there is evidence and a ruling."
+        ),
+        "metric_source": (
+            "underlying_stop_shadow.csv joined to "
+            "options_completed_trades.csv by underlying"
+        ),
+        "metric": (
+            "For each CLOSED position carrying shadow rows: the exit value "
+            "recorded at the FIRST row where the playbook stop fired, "
+            "against the credit the live stop actually realised. Paired "
+            "per position on the same book at the same instants -- an "
+            "era-versus-era comparison would compare two markets."
+        ),
+        "floor_n": 20,
+        "resolution": 0.10,
+        "verdict_rule": (
+            "WORKING if the playbook stop would have realised >= +10% of "
+            "debit more than the live stop across at least 20 closed "
+            "positions. COSTING_MONEY at <= -10%. Anything between is "
+            "NEUTRAL and the live stop stays. MEASUREMENT_STALLED if fewer "
+            "than 20 close after 40 sessions."
+        ),
+        "reversibility": (
+            "Nothing to reverse -- it has never acted. A PASS is a "
+            "proposal to LOCKBOT and the owner, not an automatic arming. "
+            "That ordering is the point: the last two stop parameters were "
+            "set from reasoning and one of them, the confirm-cycles rule, "
+            "was seeded with a cause LOCKBOT then corrected to overnight "
+            "gap-through."
+        ),
+    },
 ]
 
 # Behavioural rules that must appear in the registry or be reported as
-# UNREGISTERED. Adding a rule to LOCKBOT without a floor is the defect
+# UNREGISTERED.
+#
+# COST CONTROLS ARE DELIBERATELY ABSENT, and the omission is a decision
+# rather than an oversight. OPTIONS_MAX_SPREAD_PERCENT and
+# OPTIONS_MAX_IV_PREMIUM have never been registered either, on the
+# reasoning recorded in lockbot_config: "These are COSTS, not
+# predictions... Neither claims low IV predicts direction." A gate that
+# reduces what a bad trade costs does not need to beat a control to earn
+# its place; it needs only to be cheaper than the thing it refuses.
+#
+# OPTIONS_MAX_IMPLIED_VOLATILITY and OPTIONS_MAX_SIDE_PREMIUM_PERCENT,
+# added 2026-08-24, are in that category and follow that precedent. If
+# either is ever argued to IMPROVE returns rather than reduce cost, it
+# needs a floor here first. Adding a rule to LOCKBOT without a floor is the defect
 # this section exists to surface.
 BEHAVIOURAL_SETTINGS = [
     "OPTIONS_LOSS_COOLDOWN_SESSIONS",
     "OPTIONS_ENTRY_LIMIT_FRACTION",
     "OPTIONS_STOP_CONFIRM_CYCLES",
     "OPTIONS_ALLOW_SPREADS",
+    "OPTIONS_UNDERLYING_STOP_BUFFER",
 ]
 
 
@@ -489,6 +560,106 @@ def review_entry_fraction(entry: dict[str, Any]) -> RuleReview:
     return out
 
 
+def review_underlying_stop(entry: dict[str, Any]) -> RuleReview:
+    """Would stopping on the UNDERLYING have beaten stopping on the premium?
+
+    Paired per position: the exit value recorded at the first instant the
+    playbook stop fired, against the credit the live stop actually got.
+    Both are readings from the same book, so this compares two rules
+    rather than two months.
+    """
+
+    out = RuleReview(entry["rule_id"], entry["setting"], ACCUMULATING,
+                     floor_n=entry["floor_n"], basis=entry["basis"])
+
+    import underlying_stop_shadow as shadow
+
+    rows = _rows(shadow.log_path())
+
+    if not rows:
+        out.detail = (
+            "no observations yet -- the shadow writes one row per open "
+            "position per cycle, so this fills on the next cycle with a "
+            "position open"
+        )
+        return out
+
+    # First moment the playbook stop fired on each underlying. Later rows
+    # are the same event still true, not new evidence for it.
+    first_fire: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        if (row.get("ken_would_fire") or "").strip().lower() != "true":
+            continue
+
+        name = (row.get("underlying") or "").strip()
+
+        if name and name not in first_fire:
+            first_fire[name] = row
+
+    closed = _rows(Path(config.OPTIONS_COMPLETED_FILE))
+    diffs: list[float] = []
+
+    for trade in closed:
+        if (trade.get("exit_reason") or "").strip() == "ENTRY_NOT_FILLED":
+            continue
+
+        fired = first_fire.get((trade.get("underlying") or "").strip())
+
+        if fired is None:
+            continue
+
+        debit = _as_float(trade.get("entry_debit"))
+        actual = _as_float(trade.get("exit_credit"))
+        shadow_value = _as_float(fired.get("current_value"))
+
+        if not debit or debit <= 0 or actual is None or shadow_value is None:
+            continue
+
+        # Positive means the playbook stop would have kept more of the
+        # debit than the live stop did.
+        diffs.append((shadow_value - actual) / debit)
+
+    out.n = len(diffs)
+
+    if out.n < out.floor_n:
+        divergences = sum(1 for r in rows if (r.get("verdict") or "")
+                          == shadow.KEN_ONLY)
+        out.detail = (
+            f"{out.needs} more closed positions carrying a shadow firing "
+            f"before this can be judged ({len(rows)} observation(s), "
+            f"{divergences} where only the playbook stop fired)"
+        )
+        return out
+
+    out.value = statistics.mean(diffs)
+    edge = entry["resolution"]
+
+    if out.value >= edge:
+        out.status = WORKING
+        out.detail = (
+            f"stopping on the underlying would have kept {out.value:+.1%} "
+            f"more of the debit across {out.n} closed positions. This is a "
+            "PROPOSAL to arm it, not an arming -- it has never acted."
+        )
+    elif out.value <= -edge:
+        out.status = COSTING_MONEY
+        out.detail = (
+            f"stopping on the underlying would have kept {out.value:+.1%} "
+            f"of the debit -- worse than the live stop across {out.n} "
+            "closed positions. The playbook rule is refused on evidence."
+        )
+    else:
+        out.status = NEUTRAL_ON_DIRECTIVE
+        out.detail = (
+            f"{out.value:+.1%} across {out.n} positions, inside the "
+            f"+/-{edge:.0%} band. Indistinguishable, so the live stop "
+            "stays -- a tie goes to the incumbent."
+        )
+
+    return out
+
+
 def review_stop_confirm(entry: dict[str, Any]) -> RuleReview:
     """Does waiting a cycle before selling help or hurt?"""
 
@@ -611,6 +782,7 @@ REVIEWERS = {
     "entry_limit_fraction": review_entry_fraction,
     "stop_confirm_cycles": review_stop_confirm,
     "single_legs_only": review_single_legs,
+    "underlying_stop_buffer": review_underlying_stop,
 }
 
 
