@@ -74,6 +74,7 @@ NO_SPREAD_PARTNER = "NO_SPREAD_PARTNER"
 # the same rule on different instruments, and how often each binds is the
 # evidence for whether OPTIONS_MAX_RISK_PER_TRADE_PERCENT is set right.
 DEBIT_EXCEEDS_RISK_CAP = "DEBIT_EXCEEDS_RISK_CAP"
+IV_TOO_HIGH = "IV_TOO_HIGH"
 
 CONTRACT_MULTIPLIER = 100
 
@@ -443,6 +444,7 @@ def evaluate_contract(
     underlying_price: float | None = None,
     max_moneyness_percent: float = 0.07,
     max_debit_percent: float | None = None,
+    max_implied_volatility: float | None = None,
 ) -> ContractVerdict:
     """
     Apply every entry gate to one contract.
@@ -499,6 +501,27 @@ def evaluate_contract(
                 f"{distance:.1%} from ${underlying_price:.2f} — outside the "
                 f"{max_moneyness_percent:.1%} fallback window.",
             )
+
+    # Implied volatility as a COST control, not a forecast. LOCKBOT can
+    # only ever BUY premium -- one contract cannot be subdivided and this
+    # account cannot support selling -- so a high IV is simply a higher
+    # price for the same delta, with no compensating side of the trade.
+    #
+    # CLAUDE.md names IV explicitly among the controls worth having
+    # "because they reduce what a bad trade costs and do not depend on the
+    # signal working". That is the whole claim. It is NOT a bet that
+    # high-IV names underperform, and must not be read as one.
+    if (max_implied_volatility is not None
+            and quote.implied_volatility is not None
+            and quote.implied_volatility > max_implied_volatility):
+        return ContractVerdict(
+            quote,
+            IV_TOO_HIGH,
+            f"Implied volatility {quote.implied_volatility:.0%} is above "
+            f"the {max_implied_volatility:.0%} ceiling "
+            f"(source: {quote.iv_source}). The premium already prices a "
+            "move this large as normal, so the same delta costs more.",
+        )
 
     premium_cap = account_equity * max_premium_percent
 
@@ -1181,6 +1204,37 @@ def _self_test() -> int:
     # 54% of contracts arrived with no delta on 2026-08-24, so the gate
     # that picks the contract could not run on most of the chain.
     # -----------------------------------------------------------------
+    print()
+    print("The IV ceiling is a cost control, and it is optional")
+
+    def iv_verdict(iv, ceiling):
+        q = ContractQuote(
+            symbol="F260918C00014500", underlying="F",
+            expiration=date(2026, 9, 18), contract_type="call",
+            strike=14.5, bid=0.30, ask=0.32, delta=0.40,
+            implied_volatility=iv, days_to_expiration=25,
+            delta_source="feed", iv_source="feed")
+        return evaluate_contract(
+            q, account_equity=10_000.0, max_spread_percent=0.30,
+            min_dte=21, max_dte=45, delta_min=0.20, delta_max=0.60,
+            max_premium_percent=0.50, max_risk_percent=0.50,
+            stop_loss_percent=0.35, max_implied_volatility=ceiling).status
+
+    check("IV above the ceiling is rejected",
+          iv_verdict(1.20, 1.00) == IV_TOO_HIGH, iv_verdict(1.20, 1.00))
+    check("IV below it passes", iv_verdict(0.45, 1.00) == OK,
+          iv_verdict(0.45, 1.00))
+    check("exactly at the ceiling passes -- the test is >, not >=",
+          iv_verdict(1.00, 1.00) == OK, iv_verdict(1.00, 1.00))
+
+    # 54% of contracts have no IV at all. A missing value must not be read
+    # as a failing one -- that would silently halve the tradable pool and
+    # look like the gate working. A default value is a claim.
+    check("a MISSING IV is not treated as a breach",
+          iv_verdict(None, 1.00) == OK, iv_verdict(None, 1.00))
+    check("no ceiling configured means no gate",
+          iv_verdict(3.00, None) == OK, iv_verdict(3.00, None))
+
     print()
     print("Greeks fall back to the model, and say so")
 

@@ -398,3 +398,131 @@ safe to edit or prune by hand.
 - **2026-08-18 15:31** — The regime gap crossed significance for the first time at the pre-committed checkpoint: STRONG_UPTREND 9/103 (8.7%, −0.74R) vs WEAK_UPTREND 22/119 (18.5%, −0.45R), two-tail p≈0.04, with STRONG_UPTREND winning 0 of its last 28 resolutions — the standing recommendation to block STRONG_UPTREND is now met, conditional on equity entries re-enabling (currently False) and with the caveat that the sample pools pre- and post-expansion generations.
 
 - **2026-08-18 15:31** — Shadow resolved grew 229→247 with 2 wins in the marginal 18 (cumulative 41/247, 16.6%, −0.502R), and the short/downtrend side cooled further to 10/25 (40.0%) after 0 wins in its 4 marginal resolutions — still under the 30-trade floor, still unpooled across generations.
+
+- **2026-08-19 02:27** — Owner directive 2026-08-19: answer engineer questions (items in waiting_on_you) proactively in every session, without waiting for the owner to prompt — check waiting_on_you at session start and rule on anything pending.
+
+- **2026-08-19 15:31** — FAILURE: NEW LOCKBOT defect, live and urgent: OPTIONS_MANAGER is DEGRADED with '2 untracked position(s)' — the XLF 58/58.5 spread was booked ENTRY_NOT_FILLED at $0 on 08-19 but filled at the broker afterwards, so its two legs are held live with NO software stop, and options_manager (the sole exit authority for options) does not track them; item 50d2f36d is filed but the position remains unprotected right now. This is a fill-after-abandon race in the unfilled-entry detection path shipped ~07-30 — LOCKBOT, not the environment, and currently unhandled.
+
+- **2026-08-19 15:31** — FAILURE: The only recurring incident in the feed is the already-recorded 5-crash DNS burst to paper-api.alpaca.markets on Saturday 08-15 — the environment failing, absorbed correctly by the mid-cycle retry loop; the startup degraded-start/watchdog path remains unexercised.
+
+- **2026-08-19 15:31** — FAILURE: The stop-overshoot failure class (4 prior occurrences, worst −49%) produced no new instance this window only because the option book was flat until XLF — it is dormant, not fixed, and the unprotected XLF position is exposed to worse than overshoot: it has no stop at all.
+
+- **2026-08-19 15:31** — The shadow book jumped 247→375 resolved and the marginal 128 won 43 (33.6%, right at breakeven) — the strongest cohort ever — but it splits antisymmetrically: marginal uptrend longs won 42/60 (STRONG_UPTREND 26/31, WEAK_UPTREND 16/29) while marginal downtrend/shorts won 1/68, the signature of a single broad rally in the resolution window rather than a strategy property.
+
+- **2026-08-19 15:31** — The 08-18 STRONG_UPTREND block recommendation (p≈0.04 at 9/103 vs 22/119) is no longer supported: pooled cumulative regimes now read STRONG_UPTREND 35/134 (26.1%) vs WEAK_UPTREND 38/148 (25.7%) — the gap is erased — and since the marginal cohort straddles the 08-13 pool-generation boundary, the recommendation must be withdrawn pending a per-generation split; it was inert anyway (EQUITY_ENTRIES_ENABLED confirmed False in state).
+
+- **2026-08-19 15:31** — The short/downtrend side now clears the 30-trade floor for the first time at 11/93 (11.8%, avg −0.65R) — the earlier 10/17 (58.8%) promise collapsed after 1 win in 68 marginal resolutions, so shorts currently look worse than longs, with the same generation-pooling caveat.
+
+- **2026-08-19 15:31** — Item abbb0d96 is applied: the engineer found a THIRD cap path (options_scanner re-checking the BUFFERED debit as debit×0.35, which let spreads clear selection at the ceiling and gain 3% on submit) and replaced all three with a single debit_ceiling() chokepoint — awaiting my verification, and the live acceptance clause needs the first post-fix session's entries at equity ~$477 (cap ~$48).
+
+- **2026-08-19 15:31** — Equity is $477.43, −26.6% from the $650 start (down from $500.64 on 08-18), though the daily arithmetic is muddied by the XLF spread's $32 debit being held at the broker but booked as $0.
+
+- **2026-08-19 21:11** — 2026-08-20 ruling on 7783c774 (execution-cost, item 80b8a35f): entries move to f=0.5 midpoint pricing but ONLY after 50d2f36d (cancel-confirm/adopt-on-race) is closed and verified, since slower fills multiply traffic through that open race window; exits pay the spread permanently — stops price at the bid, two-stage mid-then-bid rejected for the stop path; mid-priced TP/time exits deferred as a possible future item; 09928949 recovery moves (broker-field restore + phantom row deletion) approved.
+
+- **2026-08-19 21:17** — 2026-08-20: Item 50d2f36d verified closed (cancel-confirm-or-adopt in options_manager; XLF adopted, tracked, stop operated). Standing rule from the engineer's approved deviation: options_manager adopts only positions traceable to a LOCKBOT order id and PAGES on all other untracked broker positions — never blanket-adopt, because the owner trades this account manually. Residual noted: an UNKNOWN classify verdict immediately after a cancel request still falls through to CLOSED_AT_BROKER and drops tracking on a non-terminal read; mitigated by the untracked-position alert, not fixed.
+
+- **2026-08-19 21:48** — 2026-08-20 ruling on ae766d69 (item 90825785): universe pruning NOT to be built now — 7/8,380 contracts passing means the gates already prune every cycle, so a persistent exclusion list changes no decision, only scan cost; if ever built it keys on measured instrument properties (ZERO_BID, median spread) never rejection history or account-relative reasons (TOO_EXPENSIVE/DELTA_OUT_OF_RANGE deleted QQQ/SPY/IBIT, the tightest books), with sample floor and mandatory expiry/re-test; the owner's learn-from-own-trades directive is answered by the existing execution-cost loop (spread drag 5.88x gross, f=0.5 entries per 7783c774) with fill rate as the first feedback metric.
+
+- **2026-08-19 21:56** — 2026-08-20: Time-of-day options-spread effect (8.4% vs 12.4% median by hour) was a symbol-mix artifact — same-symbol pairing flat across hours; per-symbol median spread is stable across 11,591 observations (QQQ 2.5%, NVDA 3.2%, IBIT 3.6% vs IYR 40%, PYPL 48%, BITO 82%); ruled the measured-spread universe filter NOT built (gate already rejects wide names, zero outcome change) — spec and trigger recorded in engineer note, and the per-symbol table feeds the f=0.5 fill-rate analysis.
+
+- **2026-08-20 05:55** — 2026-08-20 order-flow pre-registration COMMITTED (ruling on 5017f9b1, ONE attempt ever): daily signed-volume imbalance z>=2.0 (quote-rule classifier, midpoints dropped, no tick fallback), SIP tape through day-T close, entry T+1 open / exit T+1 close, lab pool ~78 symbols; pass needs edge >= +0.10R net over BOTH a price-matched control (mandatory — imbalance is confounded with the day's move, same as news volume) AND >95th pct of seeded random control (seed 20260820, >=500 draws), >=500 events / >=3 years / no year >40% / >=100 distinct days day-clustered, same-sign every year, 2025 held out and computed once; mirrored z<=-2 short arm is the regime-luck discriminator (pass without it = shadow only); any failure kills the family permanently; stated prior 0.10.
+
+- **2026-08-20 06:06** — 2026-08-20: 5017f9b1 order-flow pre-registration AMENDED pre-data (item 8d3fc8c2) after pull-cost probe showed the full-tape pull needs ~407-1000h: daily imbalance is now estimated from six fixed 10-min windows (09:30, 10:00, 11:00, 13:00, 14:30, 15:50 ET), baseline computed from the same sampled estimator, all floors/controls/seed/holdout unchanged; a floor failure kills the test, windows are immutable, and a second cost overrun means Option 4 (kill), never a second amendment.
+
+- **2026-08-20 06:07** — 2026-08-20: Order-flow imbalance family (5017f9b1/81dafcb9/8d3fc8c2) KILLED on infeasibility per the committed second-overrun rule — sampled-window probe measured ~158h (9.7s/symbol-day x 78 x 756) vs the 60-130h estimate, and a multi-day tick pull would contend with options_manager's API budget (the only stop loss); closed as unmeasurable, not refuted; revisit only if bulk tick files become available, as a fresh registration.
+
+- **2026-08-20 08:35** — 2026-08-20: Second occurrence of the daily-loss disagreement defect — OPTIONS_SCANNER reported -11.56% and locked out entries while market_scanner showed daily_pnl 0.0 and daily_loss_limit_hit=false at the same minute (first occurrence 08-14: -3.84% vs +0.45%); owner raised MAX_DAILY_LOSS_PERCENT to the 0.10 ceiling to stop lockouts, so the equity-path limit is now effectively neutered by design at his instruction.
+
+- **2026-08-20 08:36** — 2026-08-20 owner directive: "take the blows and move forward" — no daily lockouts; MAX_DAILY_LOSS_PERCENT raised to the 0.10 ceiling by his instruction, leaving the debit ceiling and -35% software stop as the only brakes; relayed to engineer as 1afee6f5 together with the second occurrence of the OPTIONS_SCANNER/market_scanner daily-loss disagreement (-11.56% vs 0.0%), which may defeat the directive by locking entries on a miscomputed number.
+
+- **2026-08-20 09:04** — 2026-08-20 owner directive: scanner must have memory of losses on a name ("every aspect of LockBot needs to be autonomous and learning") — filed as a per-underlying loss cooldown (5 sessions, journal-backed, blocked entries shadow-logged with cooldown_blocked tag so the memory itself is measurable); triggering event was the SOFI 19/20 re-entry at the exact strikes that stopped out 08-18.
+
+- **2026-08-20 15:32** — FAILURE: The only incident in the feed remains the already-recorded 5-crash DNS burst to paper-api.alpaca.markets on 08-15 — environment, absorbed correctly by the retry loop, handled; the feed's blind spot to process-level deaths stands.
+
+- **2026-08-20 15:32** — FAILURE: Recurring LOCKBOT defect, third consistent data point: at 19:55Z on 08-20 market_scanner reports daily_pnl exactly 0.0 with daily_loss_limit_hit=false on a day that realized −$24 of option stop losses — the same blindness behind the 08-14 (−3.84% vs +0.45%) and 08-20 morning (−11.56% vs 0.0) disagreements; recorded in item 1afee6f5 but not yet fixed, so it is survived, not handled.
+
+- **2026-08-20 15:32** — FAILURE: The stop-overshoot class produced no severe instance today only because all three stops were intraday (worst −36.4%, and NFLX actually realized −26.1%, better than the −35% threshold) — but TLT and BAC are now held overnight, re-exposing the structural gap-through risk; dormant, not fixed.
+
+- **2026-08-20 15:32** — FAILURE: The per-symbol loss-memory gap (item 152a38bd, still open) cost again: the SOFI 19/20 re-entry that triggered the directive stopped out in 30 minutes at −36.4%.
+
+- **2026-08-20 15:32** — Shadow resolved grew 375→411 with only 3 wins in the marginal 36 (8.3%) — the 08-19 rally cohort's 33.6% did not persist — cumulative 87/411 (21.2%, −0.365R).
+
+- **2026-08-20 15:32** — Both directions now clear the 30-trade floor at pooled level for the first time: downtrend/short 13/109 (11.9%, avg ≈−0.64R) vs uptrend/long 74/302 (24.5%) — shorts measurably worse, with the standing caveat that both pools mix pre- and post-expansion generations.
+
+- **2026-08-20 15:32** — The abbb0d96 live acceptance clause is now met: all four 08-20 option entries (SOFI $33, NFLX $46, TLT $27, BAC $41) respected the debit ceiling at time of entry — the first session where every entry the cap exists to constrain was constrained.
+
+- **2026-08-20 15:32** — The first BEAR_PUT_SPREAD entries in project history landed 08-20 (NFLX closed −26.1%, TLT and BAC open), all tagged WEAK_DOWNTREND — the options path now expresses bearish spreads, not just long puts.
+
+- **2026-08-20 15:32** — An options daily entry limit of 4 exists and bound for the first time on 08-20: OPTIONS_SCANNER reports 'No new options entries: 4 option trade(s) today, at the 4 daily limit' — this limit is not previously on record.
+
+- **2026-08-20 15:32** — Equity is $386.01, −40.6% from the $650 start and down $91.42 from 08-19's reading, while today's realized option losses total only −$24 and open TLT/BAC marks sit near cost — most of the day's decline is unattributed in the tracked ledger (08-19's figure was already muddied by the XLF booking).
+
+- **2026-08-20 15:32** — The new account's realized options ledger is 0 wins in 6 closed trades at −$176 (NVDA −$62, INTC −$76, SOFI −$14, XLF $0, SOFI −$12, NFLX −$12).
+
+- **2026-08-20 15:32** — The adopted XLF spread exited with reason STOP_LOSS at exactly $0.00 P&L (exit credit equals entry debit to the cent) after having marked −72% while untracked — an implausibly clean stop fill worth a ledger/source check before trusting the stop path's accounting on adopted positions.
+
+- **2026-08-20 19:53** — 2026-08-21 memory-review ruling: approved a registry-of-self-measuring-rules module (health_monitor daily gate, transitions-only reporting, COSTING_MONEY marks degraded, MEASUREMENT_STALLED is a verdict); floors set at adoption by the brain, one pre-verdict amendment max; floors committed for the two live rules — loss cooldown judged on mean R of resolved cooldown_blocked rows at n>=30 (±0.36R power, >=+0.36R = costing money), f=0.5 limit entries judged on net-per-attempt (spread captured minus adverse-selection vs unfilled counterfactuals) at n>=50 with a fill-rate<20% tripwire at n>=30; reading judgeable registry rules is now a standing session obligation, same class as waiting_on_you.
+
+- **2026-08-20 21:49** — 2026-08-21 ruling (item e86b3e97): OPTIONS_STOP_CONFIRM_CYCLES adopted into the rule registry, not exempt — metric is paired delta per first-strike event ((resolution value − V0 at stop_strikes 0→1)/entry_debit, same formula for confirmed and recovered paths), floors: mean ≤ −0.05 of debit at n≥30 events = COSTING_MONEY, MEASUREMENT_STALLED if <30 after 20 sessions; requires a persisted strike-event log (recoveries currently erase history); the ~7% mean stop overshoot must NOT be seeded as the rule's cost — NVDA/INTC overshoot was overnight gap-through at the first post-open cycle, not confirmation delay.
+
+- **2026-08-20 21:56** — 2026-08-21 ruling on the owner's 24h-hold directive: the 23.6h median options hold is an artifact of 0-for-6 stop-outs (winners are designed to run to 10d/14-DTE — PCG took 7 days), so recommended NO change; if the owner insists, it must be a wall-clock 24h stop (never session/bar count), registry-entered with floor mean paired-delta ≤ −0.05 of debit at n≥30 capped exits, and a true 24h horizon implies shorter-DTE contract selection, a redesign needing fresh pre-registration.
+
+- **2026-08-20 22:05** — 2026-08-21 ruling: SOLAS to be connected as adversarial critic ONLY (reviews pre-registrations pre-commit, permanent kills, exit-path verify_fix closures; no proposing, no capital path), wired via auto-posted trigger events + registry floor + 48h commit timeout; the named already-converged blind spot is that the 08-06 'strategy space exhausted at this size' ruling was never re-argued after the $650 reset and options go-live.
+
+- **2026-08-21 15:32** — FAILURE: The only feed incident is the already-recorded 5-crash DNS burst to paper-api.alpaca.markets on 08-15 — environment, absorbed correctly by the retry loop, handled; the startup degraded-start/watchdog path remains unexercised in anger.
+
+- **2026-08-21 15:32** — FAILURE: The stop-overshoot class recurred twice on 08-21 and gained a new sub-class: BAC exited −48.8% at 13:36:33Z (first post-open cycle, the known gap-through mechanism), but GDX exited −83.8% just 9.5 minutes after entry INTRADAY — the worst realized overshoot ever, and it cannot be gap-through, so the 08-18 attribution of overshoot to overnight gaps no longer covers all instances. This is LOCKBOT (software stop deciding on quoted value, exit filling at the bid of a wide book), recurring, and unhandled.
+
+- **2026-08-21 15:32** — FAILURE: The daily-loss miscomputation is now a three-occurrence recurring LOCKBOT defect (08-14, 08-20 x2, 08-21 lockout per d62e4060) that directly defeats the owner's no-lockout directive; H58 identifies the mechanism but the fix has not shipped — survived, not handled.
+
+- **2026-08-21 15:32** — FAILURE: RULE_REVIEW is DEGRADED flagging OPTIONS_STOP_CONFIRM_CYCLES as having no pre-agreed floor, and its 08-21 00:56 run POST-dates my e86b3e97 floor ruling — the registry is doing its designed job; the defect is that the ruled floor has not been wired into the registry, blocked on the unbuilt strike-event log. LOCKBOT-side wiring gap, visible and in-flight rather than ignored.
+
+- **2026-08-21 15:32** — The GDX 109/110 bull call spread entered 08-21 14:31Z and stopped out at 14:40Z — 9.5 minutes — realizing −83.8% (−$31 on a $37 debit), the worst stop overshoot on record and the first severe one that is intraday rather than overnight gap-through.
+
+- **2026-08-21 15:32** — The XLF ledger has been corrected: the completed-trades row now reads $32 debit / $9 credit / −$23 (−71.9%), superseding the 08-20 note of an implausible exact-$0.00 P&L on the adopted position — and −71.9% is itself another first-post-open-cycle overshoot.
+
+- **2026-08-21 15:32** — The new account's realized options ledger is 0 wins in 8 closed trades at −$250 (NVDA −62, INTC −76, SOFI −14, XLF −23, SOFI −12, NFLX −12, BAC −20, GDX −31); equity is $383.53, −41.0% from the $650 start.
+
+- **2026-08-21 15:32** — Ledger arithmetic does not close: $650 + $2.95 equity P&L − $250 options P&L = $402.95 with TLT at its $27 cost, versus actual equity $383.53 — either TLT marks near $8 (below its unfired −35% stop at $17.55, which would be an exit-path failure) or roughly $19 is untracked (owner manual trades are known to occur on this account); needs a broker read to split.
+
+- **2026-08-21 15:32** — The regime gap is now fully erased at pooled level: STRONG_UPTREND 38/154 (24.7%) vs WEAK_UPTREND 41/163 (25.2%) — the STRONG_UPTREND block question is closed on pooled data, and only a per-generation split could revive it.
+
+- **2026-08-21 15:32** — Shorts/downtrend won 0 of their 19 marginal resolutions and now sit at 13/128 (10.2%, ≈−0.70R) versus longs/uptrend 79/317 (24.9%) — both sides well past the 30-trade floor, shorts measurably worse, with the standing generation-pooling caveat.
+
+- **2026-08-21 15:32** — Shadow resolved grew 411→445 with 5 wins in the marginal 34 (14.7%); cumulative 92/445 (20.7%, −0.38R).
+
+- **2026-08-21 15:32** — TLT is the only remaining open option and the first position on this account ever to trade above water (highest_value $33 vs $27 debit, +22% peak).
+
+- **2026-08-21 19:58** — 2026-08-22 ruling on 5e8d5140 (OPTIONS_LOSS_COOLDOWN_SESSIONS cut 5→1 by owner): registry sample CONTINUES but every cooldown_blocked row must carry the parameter value in force (per-parameter split required at verdict, sign flip between cohorts blocks a pooled COSTING_MONEY); the cut is NOT an amendment because amendments are changes to the measurement apparatus (metric/floor/band/verdict rules) not to the measured rule — but any future parameter move made once resolved rows exist and a verdict is approaching is measurement evasion and forces a fresh cohort; MEASUREMENT_STALLED is expected and correct for this rule at 1 session.
+
+- **2026-08-22 15:31** — FAILURE: One new environment failure: a single cycle crash at 07:31 CT Saturday 08-22 on APIError 'service temporary unavailable' — a broker-side 503, not DNS, count 1, no recurrence in the feed. That is the environment, not LOCKBOT, and the absence of a repeat suggests the retry loop absorbed it.
+
+- **2026-08-22 15:31** — FAILURE: RULE_REVIEW remains DEGRADED on 'no pre-agreed floor for OPTIONS_STOP_CONFIRM_CYCLES' with the same 08-21 00:56 heartbeat — this is the already-recorded LOCKBOT-side wiring gap (floor ruled in e86b3e97 but blocked on the unbuilt strike-event log); persisting and visible, in-flight rather than ignored.
+
+- **2026-08-22 15:31** — FAILURE: Nothing else is recurring: the 08-15 DNS burst has aged out of the window, the stop-overshoot class produced no new instance only because no option trade has occurred since GDX (dormant, not fixed), and the daily-loss miscomputation (d62e4060, three occurrences) has no shipped fix — survived, not handled.
+
+- **2026-08-22 15:31** — A new incident fingerprint appeared: one controller cycle crash on APIError 'service temporary unavailable' (broker 503) at 07:31 CT Saturday 08-22 — the first non-DNS API-side crash on record, environment-caused, one-off, absorbed by the retry loop.
+
+- **2026-08-22 15:31** — The Friday 08-21 afternoon session (after the 15:32 pass) produced nothing measurable: zero new shadow resolutions (445 resolved, 643 still unresolved), zero option entries or exits after the GDX stop, and TLT closed the week as the sole open position unchanged at highest_value $33 vs $27 debit — whether the quiet afternoon reflects the d62e4060 lockout, the 1-session cooldown benching names, or simply no candidates clearing the gates (typically ~7/8,380) cannot be attributed from this state.
+
+- **2026-08-22 15:31** — REGIME_OPPOSES_SHORT appears as a rejection reason (3 of the last 4,000 signal rows) — a tag not previously on record; at n=3 it is only worth noting that the gate exists.
+
+- **2026-08-23 10:48** — 2026-08-23 ruling on owner's 20-rule options playbook: ADOPT NOTHING — six errors confirmed (theta contradiction, inverted put deltas, IV rules contradict with the CALL side being the conventionally wrong one, stop rule behaves oppositely on its two tiers, 3-5x vs 100% target conflict, "inverse" sizing mislabel), plus two the engineer missed (deep ITM excluded twice over by the 0.35-0.60 delta window AND the ~$38 debit ceiling; 3-5x ROI structurally impossible on vertical spreads whose max value is the strike width); the four sound habits are already live (14-DTE, 10d, -35% stop, debit ceiling/slots); conviction tiering is inexpressible since confidence=100 on every tradable setup by construction; market entries rejected against the measured 11.2% median spread; no registry entry warranted — the real follow-up is floors on existing exit rules, already on the agenda via e86b3e97.
+
+- **2026-08-23 12:03** — 2026-08-23 ruling on owner's spreads-off directive (stated twice): APPROVED as ONE registered rule — OPTIONS_ALLOW_SPREADS off + delta floor lowered to 0.20 (0.10 rejected as lottery; at 0.20 only 13 affordable contracts/7 symbols at $38 ceiling), floor COSTING_MONEY at mean return-on-debit <=-20% n>=30, MANDATORY shadow arm keeping the vertical selector logging the would-have-been spread per entry; the doubled-friction argument is sound (worse than 2x vs net debit) but the 0-for-8 spread record is NOT evidence against the structure (all eight died on the -35% stop/gap-through, structure-indifferent); loss profile shifts to smaller, more frequent stops with worse percent overshoot, expiry-intrinsic argument moot under 14-DTE rule; reversible at owner-named equity level.
+
+- **2026-08-23 15:31** — FAILURE: The 7-day feed holds two already-recorded items and nothing recurring: one broker-side 503 cycle crash Saturday 08-22 (environment, count 1, absorbed by the retry loop) and RULE_REVIEW DEGRADED on the unwired OPTIONS_STOP_CONFIRM_CYCLES floor (a LOCKBOT wiring gap, ruled in e86b3e97 and blocked on the unbuilt strike-event log — visible and in-flight, not ignored; its stale 08-21 heartbeat is expected under transitions-only reporting).
+
+- **2026-08-23 15:31** — FAILURE: The three known LOCKBOT defect classes remain survived-not-handled: stop overshoot is dormant only because no option has traded since GDX, the daily-loss miscomputation (d62e4060, three occurrences) has no shipped fix, and both stand ready to recur at the next live session.
+
+- **2026-08-23 15:31** — FAILURE: Stale files (universe.csv 55.7h, signals/heartbeats 48.5h) are Sunday reading Friday's close — the environment's calendar, not a failure.
+
+- **2026-08-23 15:31** — The delta half of the 08-23 spreads-off ruling has landed in config — options_delta_window now reads 0.20–0.60 (floor was 0.35) — but the state exposes no OPTIONS_ALLOW_SPREADS flag and TLT (a spread) is still the open position, so whether spreads are actually disabled is unverified until the next options scan.
+
+- **2026-08-23 15:31** — Since the 08-22 pass, unresolved shadow rows fell 643→567 while resolved stayed exactly 445, meaning ~76 rows terminated as EXPIRED timeouts with zero reaching stop or target; EXPIRED is now 328 of 779 terminal outcomes (42%), up from roughly a quarter (84 rows) on 08-13, so the win-rate headline's denominator excludes a growing share of setups.
+
+- **2026-08-23 15:31** — Nothing else moved over the weekend: equity $383.53, TLT unchanged at $33 peak vs $27 debit, decided shadow counts and regime splits identical to 08-22 — no fresh statistical verdicts are possible before Monday.
+
+- **2026-08-23 20:58** — 2026-08-23 playbook-rewrite ruling: adopt nothing now — q_* tiering blocked pending a pre-registered q_*-vs-outcome test, strike-referenced stop is INAPPLICABLE at delta 0.20 (OTM entries stop at entry), IV rule subsumption conditional on grepping that OPTIONS_MAX_IV_PREMIUM is actually wired, and the ONE real playbook idea — delta-scaled exit bands (elasticity means +50/-35 tightened in underlying terms at delta 0.20) — is deferred as a fresh pre-registration AFTER the spreads-off single-leg cohort resolves, so as not to contaminate its registered floor (mean return-on-debit <= -20% at n>=30).
+
+- **2026-08-24 10:35** — Owner directive 2026-08-24: watch the affordable-options names each session — NU (only contract passing spread+affordability, currently blocked on the near-dated IV premium gate; expected to pass if IV normalizes), plus SOFI and any other underlying whose contracts fit the ~10%-of-equity debit ceiling (~$38 at $378) — and report their gate status proactively.

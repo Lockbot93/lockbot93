@@ -909,6 +909,36 @@ OPTIONS_MAX_PREMIUM_PERCENT = 0.30
 # it would exist without ever being fillable.
 OPTIONS_MAX_OPEN_POSITIONS = 3
 OPTIONS_MAX_TOTAL_PREMIUM_PERCENT = 0.60
+
+# Per-SIDE premium cap: calls and puts each capped separately, from the
+# owner's playbook (2026-08-25, Rule 8 -- 15% calls, 15% puts, 30% both).
+#
+# WHY ONLY THE PER-SIDE HALF WAS ADOPTED. The playbook's 30% COMBINED cap
+# is already enforced, structurally and invisibly:
+#
+#     OPTIONS_MAX_OPEN_POSITIONS (3) x OPTIONS_MAX_RISK_PER_TRADE_PERCENT
+#     (0.10) = 0.30
+#
+# Three positions, each capped at a tenth of equity, cannot exceed three
+# tenths of it. Both terms are percentages of live equity, so the
+# relationship holds at any account size. Adding a 30% combined setting
+# would be a second expression of a limit that already exists -- the
+# "one quantity computed in two places" defect that produced the debit
+# ceiling, entry limit and exit valuation bugs this month. It was NOT
+# added, deliberately. OPTIONS_MAX_TOTAL_PREMIUM_PERCENT at 0.60 is
+# already unreachable for the same arithmetic; it is left alone rather
+# than tuned, because changing an unreachable number looks like action
+# and is not.
+#
+# The per-side split IS new: nothing has ever stopped LOCKBOT holding
+# every position on the same side of the market. On 2026-08-24 it held
+# $53.00 of calls and no puts, 14.3% of a $371.26 account -- so this cap
+# binds on the very next call entry, which is what makes it worth having
+# rather than decoration.
+#
+# It is a CONCENTRATION control, not a directional view. Three long calls
+# are one bet on the market rising, sized three times.
+OPTIONS_MAX_SIDE_PREMIUM_PERCENT = 0.15
 OPTIONS_MAX_CONTRACTS_PER_POSITION = 1
 OPTIONS_MAX_NEW_ENTRIES_PER_CYCLE = 1
 OPTIONS_MAX_TRADES_PER_DAY = 4
@@ -1188,6 +1218,57 @@ OPTIONS_MAX_SPREAD_PERCENT = 0.05
 OPTIONS_REQUIRE_NONZERO_BID = True
 
 # Exits, all measured against the premium paid, not the underlying.
+# Absolute implied-volatility ceiling.
+#
+# IT IS NOT A SECOND COPY OF OPTIONS_MAX_IV_PREMIUM, and the distinction
+# has to stay visible or one of them will be deleted as redundant by a
+# future reader. They measure different quantities:
+#
+#   OPTIONS_MAX_IV_PREMIUM     IV divided by REALISED volatility. Asks
+#                              "is this contract overpriced relative to
+#                              how much the stock actually moves?"
+#   OPTIONS_MAX_IMPLIED_VOL.   raw IV. Asks "how much does this stock
+#                              move at all?"
+#
+# A name that genuinely swings 100% a year priced at 110% IV passes the
+# first gate (fairly priced) and fails this one. That is intended, and
+# the reason is NOT overpricing -- it is the stop.
+#
+# WHY THE STOP IS THE REASON. Every one of the nine option trades closed
+# to date died on the stop; not one timed out and not one reached target.
+# A fixed -35% band is a fixed PREMIUM distance, and the probability of
+# touching it before +50% rises with the volatility of the underlying,
+# regardless of direction. On a high-IV contract the band is closer in
+# time even when it is identical in percent. So this gate reduces how
+# often noise alone closes a position.
+#
+# That claim is falsifiable and is registered in rule_registry rather
+# than assumed.
+#
+# WHY 1.00 AND NOT KEN'S 40%. The owner's playbook (2026-08-25) sets a 40%
+# IV gate. Measured against the real chain on 2026-08-24 -- 350 contracts,
+# seven names, 21-45 DTE:
+#
+#     p5 18.6%   p25 26.1%   MEDIAN 50.2%   p75 68.0%   p95 94.8%
+#
+#     a 40% ceiling keeps  41% of contracts
+#     a 60% ceiling keeps  60%
+#     a 80% ceiling keeps  85%
+#     a 100% ceiling keeps 96%
+#
+# Ken's 40% sits below the median of this universe and would reject 59% of
+# an already thin pool -- 13 contracts across 7 symbols at the current
+# delta floor. His gate was written for his universe, not this one.
+#
+# So this starts as a TAIL CUT, removing only the top 4%: IV above 100%
+# means the market prices a more-than-doubling as ordinary, which is event
+# or meme territory. Tightening it toward 40% is a decision for evidence,
+# not for one afternoon's distribution -- the same discipline that governs
+# OPTIONS_MIN_QUALITY, which has been left unset for the same reason.
+#
+# Registered in rule_registry so it can be judged rather than believed.
+OPTIONS_MAX_IMPLIED_VOLATILITY = 1.00
+
 OPTIONS_TAKE_PROFIT_PERCENT = 0.50
 OPTIONS_STOP_LOSS_PERCENT = 0.35
 

@@ -212,6 +212,43 @@ class PortfolioGate:
     allowed: bool
     reason: str
 
+    # Whether a refusal ends the whole cycle or only this candidate.
+    #
+    # Every gate before the per-side cap was account-wide -- position
+    # count, daily trades, total premium -- so the caller correctly BREAKS
+    # out of the candidate loop on refusal. A per-side cap is not
+    # account-wide: a full call book must not stop a put. Refusing with
+    # blocks_all left True would skip every remaining candidate including
+    # the ones the split cap exists to admit, and the log would read
+    # "stopping entries" as though the account were full.
+    blocks_all: bool = True
+
+
+def premium_by_side(positions: dict) -> dict[str, float]:
+    """Committed premium split into calls and puts.
+
+    The side is read from the OCC symbol rather than from the strategy
+    name, because the symbol is what the broker holds and a strategy label
+    is a local description of it. A position whose symbol cannot be parsed
+    is counted under "unknown" and therefore constrains nothing -- it is
+    never silently attributed to a side, which would let one bad parse
+    block entries on a side the account is not actually holding.
+    """
+
+    totals: dict[str, float] = {"call": 0.0, "put": 0.0, "unknown": 0.0}
+
+    for position in positions.values():
+        premium = float(getattr(position, "entry_debit", 0.0) or 0.0)             * float(getattr(position, "contracts", 1) or 1)
+
+        try:
+            side = contracts.parse_occ_symbol(position.long_symbol).contract_type
+        except (ValueError, AttributeError):
+            side = "unknown"
+
+        totals[side if side in ("call", "put") else "unknown"] += premium
+
+    return totals
+
 
 def check_portfolio_room(
     *,
@@ -220,6 +257,8 @@ def check_portfolio_room(
     committed_premium: float,
     account_equity: float,
     entries_this_cycle: int,
+    side_premium: dict[str, float] | None = None,
+    proposed_side: str | None = None,
 ) -> PortfolioGate:
     """Apply the account-level gates that contract selection cannot see."""
 
@@ -265,6 +304,32 @@ def check_portfolio_room(
             f"full, not an absence of setups. The ceiling falls as equity "
             f"does, so it can close on a cycle where nothing was bought.",
         )
+
+    # Per-side concentration. Three long calls are ONE bet on the market
+    # rising, sized three times, and nothing before this stopped that --
+    # the account held $53.00 of calls and no puts on 2026-08-24.
+    #
+    # Only the side being ADDED TO is tested. A full call book must not
+    # block a put, which is the whole point of splitting the cap.
+    side_cap_percent = getattr(
+        config, "OPTIONS_MAX_SIDE_PREMIUM_PERCENT", None)
+
+    if side_cap_percent and side_premium and proposed_side:
+        side_ceiling = account_equity * side_cap_percent
+        held = float(side_premium.get(proposed_side, 0.0) or 0.0)
+
+        if held >= side_ceiling:
+            other = "put" if proposed_side == "call" else "call"
+            return PortfolioGate(
+                False,
+                f"{proposed_side.upper()} SIDE FULL — ${held:.2f} committed "
+                f"against a ${side_ceiling:.2f} ceiling "
+                f"({side_cap_percent:.0%} of ${account_equity:,.2f}). This "
+                f"is concentration, not an absence of setups: a {other} "
+                f"setup would still be taken. Every long {proposed_side} is "
+                f"the same directional bet sized again.",
+                blocks_all=False,
+            )
 
     headroom = premium_ceiling - committed_premium
 
@@ -1128,6 +1193,8 @@ def run_options_scanner() -> OptionsScannerSummary:
             for position in positions.values()
         )
 
+        side_premium = premium_by_side(positions)
+
         print("=" * 56)
         print(f"       LOCKBOT OPTIONS SCANNER v{OPTIONS_SCANNER_VERSION}")
         print("=" * 56)
@@ -1421,11 +1488,23 @@ def run_options_scanner() -> OptionsScannerSummary:
                 committed_premium=committed_premium,
                 account_equity=account_equity,
                 entries_this_cycle=entries_this_cycle,
+                side_premium=side_premium,
+                proposed_side=STRATEGY_CONTRACT_TYPE.get(
+                    candidate["strategy"]),
             )
 
             if not gate.allowed:
-                print(f"\nStopping entries: {gate.reason}")
-                break
+                # A full side skips THIS candidate; anything account-wide
+                # ends the cycle. See PortfolioGate.blocks_all.
+                if gate.blocks_all:
+                    print(f"\nStopping entries: {gate.reason}")
+                    break
+
+                print(f"\n{candidate['symbol']}: skipped — {gate.reason}")
+                summary.rejection_reasons["SIDE_CAP_REACHED"] = (
+                    summary.rejection_reasons.get("SIDE_CAP_REACHED", 0) + 1
+                )
+                continue
 
             symbol = candidate["symbol"]
             strategy = candidate["strategy"]
@@ -1471,6 +1550,8 @@ def run_options_scanner() -> OptionsScannerSummary:
                 stop_loss_percent=config.OPTIONS_STOP_LOSS_PERCENT,
                 require_nonzero_bid=config.OPTIONS_REQUIRE_NONZERO_BID,
                 max_moneyness_percent=config.OPTIONS_MAX_MONEYNESS_PERCENT,
+                max_implied_volatility=getattr(
+                    config, "OPTIONS_MAX_IMPLIED_VOLATILITY", None),
             )
 
             long_quote = None
@@ -2779,6 +2860,83 @@ def _self_test() -> int:
           "migrate_shadow_header" not in append_shadow_row.__doc__ if
           append_shadow_row.__doc__ else True)
 
+    # -----------------------------------------------------------------
+    # Per-side premium cap (owner playbook Rule 8, adopted 2026-08-24).
+    # -----------------------------------------------------------------
+    print()
+    print("The per-side cap constrains concentration, not the cycle")
+
+    EQ = 371.26                      # 15% = $55.69
+    full = {"call": 56.0, "put": 0.0}
+
+    blocked = check_portfolio_room(
+        open_positions=1, trades_today=0, committed_premium=56.0,
+        account_equity=EQ, entries_this_cycle=0,
+        side_premium=full, proposed_side="call")
+    check("a full call side refuses another call",
+          not blocked.allowed, blocked.reason)
+
+    # THE CASE THAT MOTIVATED blocks_all. Every gate before this one was
+    # account-wide, so the caller breaks on refusal. If a side cap broke
+    # too, one full side would silently cancel every remaining candidate.
+    check("and it does NOT end the cycle",
+          blocked.blocks_all is False, str(blocked.blocks_all))
+
+    allowed = check_portfolio_room(
+        open_positions=1, trades_today=0, committed_premium=56.0,
+        account_equity=EQ, entries_this_cycle=0,
+        side_premium=full, proposed_side="put")
+    check("a full call side still admits a put", allowed.allowed,
+          allowed.reason)
+
+    # An account-wide refusal must keep ending the cycle.
+    wide = check_portfolio_room(
+        open_positions=99, trades_today=0, committed_premium=0.0,
+        account_equity=EQ, entries_this_cycle=0,
+        side_premium={"call": 0.0}, proposed_side="call")
+    check("an account-wide refusal still stops everything",
+          not wide.allowed and wide.blocks_all is True, wide.reason)
+
+    under = check_portfolio_room(
+        open_positions=1, trades_today=0, committed_premium=53.0,
+        account_equity=EQ, entries_this_cycle=0,
+        side_premium={"call": 53.0, "put": 0.0}, proposed_side="call")
+    check("under the ceiling it passes -- $53.00 against $55.69",
+          under.allowed, under.reason)
+
+    # Not knowing the side must not silently permit an unbounded position.
+    # It must not silently BLOCK one either. Absent information leaves the
+    # cap out of the decision rather than inventing a verdict.
+    unknown = check_portfolio_room(
+        open_positions=1, trades_today=0, committed_premium=56.0,
+        account_equity=EQ, entries_this_cycle=0,
+        side_premium=full, proposed_side=None)
+    check("an unknown side leaves the cap out rather than guessing",
+          unknown.allowed, unknown.reason)
+
+    print()
+    print("Premium is split by the OCC symbol, not the strategy label")
+
+    class _P:
+        def __init__(self, sym, debit):
+            self.long_symbol, self.entry_debit, self.contracts = sym, debit, 1
+
+    split = premium_by_side({
+        "F": _P("F260918C00014500", 29.0),
+        "NOK": _P("NOK260918C00011000", 27.0),
+        "TLT": _P("TLT260918P00090000", 40.0),
+    })
+    check("calls summed", abs(split["call"] - 56.0) < 1e-9, str(split))
+    check("puts summed", abs(split["put"] - 40.0) < 1e-9, str(split))
+
+    # An unparseable symbol must constrain nothing. Attributing it to a
+    # side would block entries on a side the account is not holding.
+    junk = premium_by_side({"X": _P("not-an-occ-symbol", 99.0)})
+    check("an unparseable symbol constrains neither side",
+          junk["call"] == 0.0 and junk["put"] == 0.0 and junk["unknown"] == 99.0,
+          str(junk))
+
+    print()
     print("All options-scanner checks passed.")
     return 0
 
