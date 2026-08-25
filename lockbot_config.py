@@ -1478,7 +1478,42 @@ NOTIFY_REPEAT_COOLDOWN_MINUTES = 120
 # is liquidated, not after: the module rebuilds toward
 # ETF_TARGET_ALLOCATION on the next controller cycle, so selling SCHD and
 # SCHG with this left True would simply buy them back within 5 minutes.
-ETF_PORTFOLIO_ENABLED = False
+# BACK ON 2026-08-24, owner's instruction: "just turn the sleeve on for
+# now." Reverses the 08-14 instruction recorded immediately above.
+#
+# WHY HE ASKED. He questioned why the project keeps running a strategy it
+# believes is a losing bet, and said other bots make money. The account
+# facts answered it: this sleeve is the one thing here that beat every
+# control, it was already built and tested, and it was switched off ten
+# days ago on his own instruction. Equity went $650 -> $371.26 in that
+# window with $318.26 sitting idle in cash.
+#
+# WHAT IT IS AND IS NOT, kept because the distinction is the whole reason
+# it wins: it beat the controls because it HOLDS BETA, not because it
+# selects anything. That was always the argument for it -- momentum
+# ranking lost to equal weight by 13 points a year, the entry rule lost
+# to random entry, and holding the index beat every variant tested. It
+# requires no edge, which is exactly why it is not evidence of one.
+#
+# LEFT DELIBERATELY UNCHANGED: ETF_PORTFOLIO_BUDGET stays at 160.00. The
+# owner said "for now"; raising it to put the whole $318 to work is a
+# SECOND decision he has not made, and quietly making it for him would be
+# deciding how much of his account to commit.
+#
+# CLEARED BY LOCKBOT BEFORE FLIPPING (channel a8cd0d57). The failure I
+# expected -- build_plan mechanically liquidating the sleeve to rebuild
+# an options reserve once free cash falls below it -- requires a
+# CASH-DERIVED budget to trigger. This budget is hand-set, so the loop
+# cannot arise at this setting. It returns the moment anyone makes the
+# ceiling cash-derived; do not do that without re-reading a8cd0d57.
+#
+# STILL BROKEN, AND NOT FIXED BY THIS: the flatten paths remain blind to
+# reserved symbols, so a flatten while the sleeve holds shares would sell
+# them. It does not block enabling the sleeve; it blocks flattening.
+#
+# ETF_PORTFOLIO_LIVE is already True, so this places real orders on the
+# next controller cycle rather than reporting what it would do.
+ETF_PORTFOLIO_ENABLED = True
 
 # When False the module reports what it WOULD do and places nothing.
 ETF_PORTFOLIO_LIVE = True
@@ -1535,6 +1570,12 @@ ETF_REBALANCE_DRIFT_POINTS = 10.0
 # LOCKBOT's ruling (item 1c2b28b6): nothing read it, the ETF sleeve is off
 # (ETF_PORTFOLIO_ENABLED = False since 2026-08-14), and the rebalance path
 # that would have consulted it does not exist.
+#
+# The sleeve was turned back ON 2026-08-24, so one of those three reasons
+# no longer holds. The deletion still stands on the other two: nothing
+# reads it and there is still no rebalance path. Noted rather than left
+# to read as currently true -- a stale justification is how a deleted
+# setting gets restored for a reason that expired.
 
 ETF_PORTFOLIO_STATE_FILE = PROJECT_FOLDER / "etf_portfolio_state.json"
 
