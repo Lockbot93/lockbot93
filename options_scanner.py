@@ -49,7 +49,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +110,21 @@ SHADOW_COLUMNS = [
     # An untagged row cannot be assigned to a cohort and is worth less
     # than no row, because it looks like evidence.
     "rule_param",
+    # Added 2026-08-25 with options_skew, and appended at the END rather
+    # than beside `quality` where they read better. csv_schema migrates a
+    # narrower on-disk header only when it is a PREFIX of the expected
+    # one; inserting mid-list made 2,076 existing rows unreconcilable and
+    # the guard correctly refused every write and raised an alert. Column
+    # order in this list is a data-migration decision, not formatting.
+    #
+    # Per LOCKBOT's condition 3, present from the first cycle so the
+    # detect_signal cohort and the skew cohort can never be pooled.
+    # signal_source records which signal CHOSE, not which was computed --
+    # both are computed now, so an availability column would be constant.
+    "skew",
+    "skew_stable",
+    "easy_to_borrow",
+    "signal_source",
 ]
 
 
@@ -248,6 +263,154 @@ def premium_by_side(positions: dict) -> dict[str, float]:
         totals[side if side in ("call", "put") else "unknown"] += premium
 
     return totals
+
+
+def skew_fields(row: dict | None) -> dict[str, str]:
+    """The skew columns for one candidate, blank when it could not be read.
+
+    Blank rather than 0.0 throughout: a skew of zero means puts and calls
+    price the same, which is a real and quite different claim from "no
+    reading". The registry cannot tell those apart after the fact.
+    """
+
+    if not row:
+        return {"skew": "", "skew_stable": "", "easy_to_borrow": "",
+                "signal_source": "detect_signal"}
+
+    return {
+        "skew": row.get("skew", ""),
+        "skew_stable": row.get("stable", ""),
+        "easy_to_borrow": row.get("easy_to_borrow", ""),
+        # WHICH SIGNAL ACTUALLY CHOSE, not which was computed. Once this
+        # ships both are computed every cycle, so a column recording
+        # availability would be constant and useless for splitting cohorts.
+        "signal_source": ("skew" if getattr(
+            config, "OPTIONS_SKEW_LIVE", False) else "detect_signal"),
+    }
+
+
+def collect_skew(trading_client: Any, option_client: Any, stock_client: Any,
+                 symbols: list[str], *, verbose: bool = True
+                 ) -> dict[str, dict]:
+    """One skew observation per underlying, or {} if anything goes wrong.
+
+    Wrapped whole: this is a MEASUREMENT feeding a shadow column, and a
+    failure here must never stop the scanner from doing what it already
+    did. The same reasoning as the shadow stop in options_manager.
+    """
+
+    if not getattr(config, "OPTIONS_SKEW_ENABLED", False) or not symbols:
+        return {}
+
+    try:
+        from datetime import timedelta
+
+        from alpaca.data.requests import (OptionSnapshotRequest,
+                                          StockLatestTradeRequest)
+        from alpaca.trading.requests import GetOptionContractsRequest
+
+        import options_skew as skew
+
+        today = date.today()
+        spot = {k: float(v.price) for k, v in stock_client.get_stock_latest_trade(
+            StockLatestTradeRequest(symbol_or_symbols=symbols)).items()}
+        history = skew.load_history()
+        rows: dict[str, dict] = {}
+
+        for symbol in symbols:
+            underlying_price = spot.get(symbol)
+
+            if not underlying_price or underlying_price <= 0:
+                continue
+
+            contracts_found = trading_client.get_option_contracts(
+                GetOptionContractsRequest(
+                    underlying_symbols=[symbol],
+                    expiration_date_gte=today + timedelta(
+                        days=config.OPTIONS_MIN_DTE),
+                    expiration_date_lte=today + timedelta(
+                        days=config.OPTIONS_MAX_DTE),
+                    limit=400)).option_contracts
+
+            if not contracts_found:
+                continue
+
+            # The snapshot endpoint caps at 100 symbols per request, and
+            # exceeding it is a hard 400 rather than a truncation.
+            legs = {"call": [], "put": []}
+            chain = [c.symbol for c in contracts_found]
+            snaps: dict = {}
+
+            for start in range(0, min(len(chain), 200), 100):
+                snaps.update(option_client.get_option_snapshot(
+                    OptionSnapshotRequest(
+                        symbol_or_symbols=chain[start:start + 100])))
+
+            for contract in contracts_found:
+                snapshot = snaps.get(contract.symbol)
+
+                if snapshot is None:
+                    continue
+
+                greeks = getattr(snapshot, "greeks", None)
+                legs[contract.type.value].append({
+                    "delta": getattr(greeks, "delta", None) if greeks else None,
+                    "strike": float(contract.strike_price),
+                    "dte": (contract.expiration_date - today).days,
+                    "snap": snapshot,
+                })
+
+            put = skew.pick_delta_matched(legs["put"],
+                                          target=skew.TARGET_PUT_DELTA)
+            call = skew.pick_delta_matched(legs["call"],
+                                           target=skew.ATM_CALL_DELTA)
+
+            if not put or not call:
+                continue
+
+            put_iv, put_src = skew.iv_from_quote(
+                put["snap"], underlying_price=underlying_price,
+                strike=put["strike"], days_to_expiration=put["dte"],
+                option_type="put")
+            call_iv, call_src = skew.iv_from_quote(
+                call["snap"], underlying_price=underlying_price,
+                strike=call["strike"], days_to_expiration=call["dte"],
+                option_type="call")
+
+            value = skew.skew_value(put_iv, call_iv)
+
+            if value is not None:
+                history = skew.record(history, symbol, value)
+
+            try:
+                borrowable = skew.is_borrowable(
+                    trading_client.get_asset(symbol))
+            except Exception:                               # noqa: BLE001
+                borrowable = None
+
+            rows[symbol] = skew.observation(
+                symbol, skew=value, put_iv=put_iv, call_iv=call_iv,
+                put_delta=put.get("delta"), call_delta=call.get("delta"),
+                iv_source=f"{put_src}/{call_src}",
+                easy_to_borrow=borrowable,
+                stable=skew.is_stable(
+                    history, symbol,
+                    min_readings=config.OPTIONS_SKEW_MIN_READINGS,
+                    max_spread=config.OPTIONS_SKEW_MAX_DRIFT))
+
+        skew.save_history(history)
+
+        if verbose and rows:
+            tradable = sum(1 for r in rows.values() if skew.tradable(r))
+            print(f"Skew            : {len(rows)} read, {tradable} tradable "
+                  f"({'LIVE' if getattr(config, 'OPTIONS_SKEW_LIVE', False) else 'shadow'})")
+
+        return rows
+    except Exception as error:                              # noqa: BLE001
+        if verbose:
+            print(f"  (skew unavailable this cycle: {type(error).__name__}; "
+                  "entries are unaffected)")
+        return {}
 
 
 def check_portfolio_room(
@@ -1379,6 +1542,36 @@ def run_options_scanner() -> OptionsScannerSummary:
         # before contract selection runs. They exist to build the
         # distribution, and are marked CANDIDATE so they never count as
         # decisions in the P&L.
+        # One skew reading per candidate underlying, computed once for the
+        # whole cycle. Returns {} on any failure, so a measurement problem
+        # cannot stop entries that would otherwise have happened.
+        skew_rows = collect_skew(
+            trading_client, data_client, stock_data,
+            sorted({c["symbol"] for c in candidates}))
+
+        # THE LIVE SWITCH. In shadow the order is untouched and skew is
+        # only recorded beside what detect_signal chose, which is what
+        # makes the two comparable on the same chains in the same cycles.
+        # Live, the lowest-skew tradable name goes first -- and anything
+        # skew cannot vouch for is dropped rather than ranked last, because
+        # an unstable or unborrowable name is a refusal under the
+        # pre-registration, not merely a weak candidate.
+        if getattr(config, "OPTIONS_SKEW_LIVE", False) and skew_rows:
+            import options_skew as _skew
+
+            allowed = [c for c in candidates
+                       if _skew.tradable(skew_rows.get(c["symbol"], {}))]
+
+            if allowed:
+                candidates = sorted(
+                    allowed,
+                    key=lambda c: float(skew_rows[c["symbol"]]["skew"]))
+                print(f"Ranked by       : SKEW ({len(candidates)} tradable)")
+            else:
+                candidates = []
+                print("Ranked by       : SKEW — none tradable this cycle "
+                      "(unstable or not easy-to-borrow); no entries")
+
         for rank, candidate in enumerate(candidates, start=1):
             append_shadow_row({
                 "timestamp": datetime.now(timezone.utc).isoformat(
@@ -1390,6 +1583,7 @@ def run_options_scanner() -> OptionsScannerSummary:
                 "signal": candidate["signal"],
                 "confidence": candidate["score"],
                 "quality": round(candidate["quality"], 2),
+                **skew_fields(skew_rows.get(candidate["symbol"])),
                 "action": "CANDIDATE",
                 "reason": f"rank {rank} of {len(candidates)}",
             })
@@ -2941,6 +3135,40 @@ def _self_test() -> int:
     check("an unparseable symbol constrains neither side",
           junk["call"] == 0.0 and junk["put"] == 0.0 and junk["unknown"] == 99.0,
           str(junk))
+
+    print()
+    print()
+    print("Skew columns are appended, never inserted")
+
+    # 2,076 rows were made unreconcilable on 2026-08-25 by adding these
+    # beside `quality`. csv_schema migrates a narrower on-disk header only
+    # when it is a PREFIX, so position in this list is a migration
+    # decision. The guard refused every write and alerted, which is why
+    # the log survived -- this check is so it is not rediscovered.
+    check("skew columns sit at the END of SHADOW_COLUMNS",
+          SHADOW_COLUMNS[-4:] == ["skew", "skew_stable", "easy_to_borrow",
+                                  "signal_source"],
+          str(SHADOW_COLUMNS[-4:]))
+    check("and nothing was inserted ahead of long_symbol",
+          SHADOW_COLUMNS.index("long_symbol")
+          < SHADOW_COLUMNS.index("skew"))
+
+    print()
+    print("A candidate with no skew reading is blank, never zero")
+    empty = skew_fields(None)
+    check("skew is blank", empty["skew"] == "", str(empty))
+    check("borrow status is blank, not false",
+          empty["easy_to_borrow"] == "", str(empty))
+    check("an unread candidate is still attributed to detect_signal",
+          empty["signal_source"] == "detect_signal")
+
+    filled = skew_fields({"skew": "-0.117", "stable": "true",
+                          "easy_to_borrow": "true"})
+    check("a real reading carries through", filled["skew"] == "-0.117")
+    check("signal_source follows the LIVE switch, not availability",
+          filled["signal_source"] == ("skew" if getattr(
+              config, "OPTIONS_SKEW_LIVE", False) else "detect_signal"),
+          filled["signal_source"])
 
     print()
     print("All options-scanner checks passed.")
