@@ -1187,7 +1187,57 @@ OPTIONS_MAX_MONEYNESS_PERCENT = 0.07
 #
 # This deliberately trades fewer entries for cheaper ones. Contracts
 # like the 6.5%-spread PBR call taken on 2026-07-30 no longer pass.
-OPTIONS_MAX_SPREAD_PERCENT = 0.05
+# 2026-08-24: 0.05 -> 0.08, on LOCKBOT's conditional recommendation and
+# the owner's decision. NOT a free change and must not be described as one.
+#
+# WHAT 0.05 WAS COSTING. Measured over 26,119 two-sided quotes on 08-24,
+# the spread distribution of the universe this gate filters:
+#
+#     p5 1.2%   p10 2.2%   p25 5.7%   MEDIAN 12.7%   p75 25.5%
+#
+# The gate sat BELOW the 25th percentile of its own universe. In the
+# 13:30-17:00 window it rejected 8,007 of 10,771 contracts and exactly 4
+# passed every gate, which is why the morning produced no order at all.
+# That silence was read as "no setups" for weeks; it was this.
+#
+#     ceiling   contracts admitted
+#       5%          22.2%
+#       8%          34.0%
+#      10%          41.3%
+#
+# WHY THE OLD VALUE WAS DEFENSIBLE WHEN SET. Lowered from 0.10 on
+# 2026-08-02 on exit-band geometry, for a universe of $5-$50 names with a
+# 0.35 delta floor and verticals enabled. EVERY ONE of those conditions
+# has since changed: the delta floor is 0.20, verticals are off, and the
+# debit ceiling forces the book into cheap tick-quantized premium where a
+# ONE CENT spread on a $0.30 contract is already 3.3%. The number did not
+# drift; the universe moved out from under it.
+#
+# WHY 0.08 AND NOT 0.10. 0.10 was tested and REJECTED on 08-02 because
+# exit-band travel asymmetry reached 2.34x. 0.08 lands near 2.1x, short
+# of that bar. Going to 0.10 now would be re-cutting a threshold that has
+# already failed once.
+#
+# THE HONEST FRAMING, which is LOCKBOT's and is kept verbatim because the
+# temptation to lose it is exactly why it is here: "At the current gate
+# the choice being made by default is near-zero trades at ~5% friction;
+# at 0.08 it's roughly one-a-day at up to 8% friction, into a book that
+# is 0-for-9. Both are defensible. Neither is free."
+#
+# THE CONDITION THIS SHIPPED UNDER. Registered in rule_registry with a
+# cohort split by spread band. If trades entered in the 5-8% band run
+# 0.08 of debit worse than those under 5% at n >= 30, the verdict is
+# COSTING_MONEY and this reverts to 0.05. entry_spread_percent is
+# journalled per trade so that split is possible -- without it the
+# condition would be unenforceable and the guarantee empty.
+#
+# MEASURED ON A FEED THAT IS NOT THE EXECUTABLE BOOK. The owner decided
+# on 2026-08-24 to stay on the free IEX feed rather than buy OPRA. IEX
+# carries ~4% of real volume, so every percentile above describes the
+# displayed book, not the tradable one. Two orders at the displayed ask
+# went unfilled on 08-24. This is a known and accepted limit of the
+# number, not an oversight.
+OPTIONS_MAX_SPREAD_PERCENT = 0.08
 
 # OPTIONS_MIN_OPEN_INTEREST (100) and OPTIONS_MIN_CONTRACT_VOLUME (10)
 # stood here until 2026-08-19. Deleted on LOCKBOT's ruling (item 87431cac),

@@ -293,6 +293,59 @@ REGISTRY: list[dict[str, Any]] = [
             "gap-through."
         ),
     },
+    {
+        "rule_id": "spread_ceiling",
+        "setting": "OPTIONS_MAX_SPREAD_PERCENT",
+        "mechanism": (
+            "Entry gate raised 0.05 -> 0.08 on 2026-08-24. At 0.05 the "
+            "gate sat below the 25th percentile of its own universe and "
+            "admitted 4 of 10,771 contracts across the 08-24 morning, "
+            "which is why that morning produced no order."
+        ),
+        "adopted_at": "2026-08-24",
+        "authority": (
+            "LOCKBOT recommended 0.08 CONDITIONALLY; owner decided, "
+            "having been shown the cost"
+        ),
+        "basis": "directive",
+        "power_note": (
+            "This buys frequency WITH MONEY and must never be recorded as "
+            "a free improvement. Spread is the dominant measured cost and "
+            "it is paid twice, on entry and on exit. LOCKBOT's framing, "
+            "kept verbatim: near-zero trades at ~5% friction versus "
+            "roughly one a day at up to 8%, into a book that is 0-for-9. "
+            "Both defensible, neither free. 0.10 is NOT available as a "
+            "fallback -- it was tested and rejected on 08-02 at 2.34x "
+            "exit-band travel asymmetry. Every percentile behind this "
+            "change was measured on the IEX feed, which carries ~4% of "
+            "volume; the owner chose on 08-24 to stay on it, so the "
+            "displayed book is not known to be the executable one."
+        ),
+        "metric_source": (
+            "options_completed_trades.csv, split on entry_spread_percent"
+        ),
+        "metric": (
+            "mean realised return-on-debit of trades entered in the "
+            "5-8% band against those entered under 5%. A COHORT SPLIT, "
+            "not a before-and-after: comparing post-change trades to "
+            "pre-change ones compares two markets, and the pool "
+            "generation changed on the same day."
+        ),
+        "floor_n": 30,
+        "resolution": 0.08,
+        "verdict_rule": (
+            "COSTING_MONEY if the 5-8% band runs >= 0.08 of debit worse "
+            "than the sub-5% band at n >= 30 in the wider band, and the "
+            "setting REVERTS to 0.05. WORKING requires the wider band to "
+            "be no worse; anything between is NEUTRAL and it stays. "
+            "MEASUREMENT_STALLED if fewer than 30 after 40 sessions."
+        ),
+        "reversibility": (
+            "One line back to 0.05. The revert is pre-committed here "
+            "rather than left to judgement after the numbers arrive, "
+            "which is the whole point of writing it down first."
+        ),
+    },
 ]
 
 # Behavioural rules that must appear in the registry or be reported as
@@ -317,6 +370,7 @@ BEHAVIOURAL_SETTINGS = [
     "OPTIONS_STOP_CONFIRM_CYCLES",
     "OPTIONS_ALLOW_SPREADS",
     "OPTIONS_UNDERLYING_STOP_BUFFER",
+    "OPTIONS_MAX_SPREAD_PERCENT",
 ]
 
 
@@ -560,6 +614,79 @@ def review_entry_fraction(entry: dict[str, Any]) -> RuleReview:
     return out
 
 
+def review_spread_ceiling(entry: dict[str, Any]) -> RuleReview:
+    """Do trades entered on wider books do worse than those on tight ones?
+
+    A COHORT SPLIT on entry_spread_percent, never a before-and-after.
+    The gate moved on the same day the greeks fallback and the delta
+    floor changed, so a date-split would compare three changes at once.
+    """
+
+    out = RuleReview(entry["rule_id"], entry["setting"], ACCUMULATING,
+                     floor_n=entry["floor_n"], basis=entry["basis"])
+
+    tight: list[float] = []
+    wide: list[float] = []
+
+    for row in _rows(Path(config.OPTIONS_COMPLETED_FILE)):
+        if (row.get("exit_reason") or "").strip() == "ENTRY_NOT_FILLED":
+            continue
+
+        spread = _as_float(row.get("entry_spread_percent"))
+        debit = _as_float(row.get("entry_debit"))
+        pnl = _as_float(row.get("profit_loss"))
+
+        # An untagged row is not evidence for either band. Pooling it
+        # would put every pre-2026-08-24 trade into the tight cohort by
+        # default and manufacture the comparison.
+        if spread is None or not debit or debit <= 0 or pnl is None:
+            continue
+
+        (wide if spread > 0.05 else tight).append(pnl / debit)
+
+    out.n = len(wide)
+
+    if out.n < out.floor_n:
+        out.detail = (
+            f"{out.needs} more trades in the 5-8% band before this can be "
+            f"judged ({len(tight)} sub-5% for comparison)"
+        )
+        return out
+
+    if not tight:
+        out.status = MEASUREMENT_STALLED
+        out.detail = (
+            f"{out.n} wide-band trades but no sub-5% cohort to compare "
+            "them against, so the split cannot be made"
+        )
+        return out
+
+    out.value = statistics.mean(wide) - statistics.mean(tight)
+    edge = entry["resolution"]
+
+    if out.value <= -edge:
+        out.status = COSTING_MONEY
+        out.detail = (
+            f"the 5-8% band runs {out.value:+.1%} of debit against the "
+            f"tight band over {out.n} trades. Per the condition this "
+            "shipped under, OPTIONS_MAX_SPREAD_PERCENT REVERTS to 0.05."
+        )
+    elif out.value >= 0:
+        out.status = WORKING
+        out.detail = (
+            f"the wider band is {out.value:+.1%} of debit, no worse than "
+            f"the tight one across {out.n} trades"
+        )
+    else:
+        out.status = NEUTRAL_ON_DIRECTIVE
+        out.detail = (
+            f"{out.value:+.1%} of debit across {out.n} trades, inside the "
+            f"{edge:.0%} revert threshold. It stays."
+        )
+
+    return out
+
+
 def review_underlying_stop(entry: dict[str, Any]) -> RuleReview:
     """Would stopping on the UNDERLYING have beaten stopping on the premium?
 
@@ -783,6 +910,7 @@ REVIEWERS = {
     "stop_confirm_cycles": review_stop_confirm,
     "single_legs_only": review_single_legs,
     "underlying_stop_buffer": review_underlying_stop,
+    "spread_ceiling": review_spread_ceiling,
 }
 
 

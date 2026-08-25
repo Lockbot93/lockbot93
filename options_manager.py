@@ -116,6 +116,14 @@ COMPLETED_COLUMNS = [
     # each trade was taken at, so the effect would have been invisible in
     # the record afterwards.
     "entry_delta",
+    # Added 2026-08-24 with the spread gate move from 0.05 to 0.08.
+    # LOCKBOT made the loosening CONDITIONAL on being able to split
+    # results by spread band, and a band cannot be recovered afterwards:
+    # the quote at entry is gone by the time the trade closes. Without
+    # this column the auto-revert clause it attached to the change would
+    # be unenforceable, which is the same failure as the entry-limit
+    # attempt log that accumulated rows nothing could ever resolve.
+    "entry_spread_percent",
 ]
 
 # Exit reasons
@@ -153,6 +161,7 @@ class OptionPosition:
     # a delta of zero is a claim about the contract rather than an absence
     # of data.
     entry_delta: float | None = None
+    entry_spread_percent: float | None = None
     # Consecutive cycles the stop condition has held. See decide_exit --
     # a single wide-book bid print is not evidence of a 35% loss.
     stop_strikes: int = 0
@@ -807,6 +816,11 @@ def record_completed_option_trade(
         # would read as a real measurement and poison any later split on it.
         "entry_delta": ("" if position.entry_delta is None
                         else f"{position.entry_delta:.4f}"),
+        # Blank, never 0.0 -- a zero spread is a real and very different
+        # claim from "not recorded".
+        "entry_spread_percent": (
+            "" if position.entry_spread_percent is None
+            else f"{position.entry_spread_percent:.4f}"),
     }
 
     with OPTIONS_COMPLETED_FILE.open("a", newline="", encoding="utf-8") as handle:

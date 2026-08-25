@@ -1960,6 +1960,12 @@ def run_options_scanner() -> OptionsScannerSummary:
                 # delta looked up later is a different number.
                 entry_delta=(abs(long_quote.delta)
                              if long_quote.delta is not None else None),
+                # The band this trade belongs to. Captured here because
+                # the quote is gone by the time the position closes.
+                entry_spread_percent=(
+                    long_quote.spread_percent
+                    if long_quote.spread_percent not in (None, float("inf"))
+                    else None),
                 paper_trade=config.PAPER_TRADING,
             )
 
