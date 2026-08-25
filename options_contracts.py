@@ -48,6 +48,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+import options_greeks
+
 
 # ---------------------------------------------------------------------------
 # Rejection reasons. Strings, not exceptions -- a rejected contract is a
@@ -240,6 +242,15 @@ class ContractQuote:
     implied_volatility: float | None
     days_to_expiration: int
 
+    # Where the two greeks above came from. "feed" is the exchange's own
+    # number; "model" is Black-Scholes solved from this contract's own
+    # quote by options_greeks. They are NOT the same thing and must never
+    # be pooled in a measurement without being able to split them again --
+    # a modelled delta assumes European exercise and no dividend, and is
+    # good enough for a 0.20-0.60 screen but not for anything finer.
+    delta_source: str = "none"
+    iv_source: str = "none"
+
     @property
     def mid(self) -> float:
         return (self.bid + self.ask) / 2.0
@@ -292,12 +303,36 @@ def snapshot_to_quote(
     snapshot: Any,
     *,
     as_of: date,
+    underlying_price: float | None = None,
 ) -> ContractQuote | None:
     """
     Convert one Alpaca chain snapshot into a ContractQuote.
 
     Returns None when the snapshot carries no usable two-sided quote,
     which is common outside market hours.
+
+    WHY underlying_price IS HERE (added 2026-08-24)
+
+        Alpaca's indicative feed does not reliably carry greeks. Measured
+        over 350 contracts across seven names on 2026-08-24:
+
+            delta missing        188 of 350   54%
+            IV present           162 of 350   46%
+
+        So the delta gate -- the rule that decides WHICH contract gets
+        bought -- could not run on more than half the chain. It fell
+        through to a distance-from-the-money proxy, which is a different
+        rule wearing the same name.
+
+        options_greeks solves both from the contract's own quote. It was
+        written for exactly this on 2026-08-13 and then sat unreachable
+        for eleven days because the file was saved as "options greeks.py"
+        -- a space, which Python cannot import. Nothing referenced it and
+        nothing could.
+
+        Given a spot price the gate now runs on every contract with a
+        two-sided quote. Without one the behaviour is unchanged, so this
+        can only widen coverage, never narrow it.
     """
 
     quote = getattr(snapshot, "latest_quote", None)
@@ -322,6 +357,42 @@ def snapshot_to_quote(
 
     greeks = getattr(snapshot, "greeks", None)
     delta = _as_float(getattr(greeks, "delta", None)) if greeks else None
+    iv = _as_float(getattr(snapshot, "implied_volatility", None))
+
+    if iv is None and greeks is not None:
+        # Belt and braces: the field has been seen on the snapshot only,
+        # never on greeks, but reading both costs nothing and a feed
+        # change that moved it would otherwise look like missing data.
+        iv = _as_float(getattr(greeks, "implied_volatility", None))
+
+    delta_source = "feed" if delta is not None else "none"
+    iv_source = "feed" if iv is not None else "none"
+
+    days_to_expiration = (parts.expiration - as_of).days
+
+    if underlying_price and underlying_price > 0 and days_to_expiration > 0:
+        if delta is None:
+            modelled = options_greeks.implied_delta(
+                bid=bid, ask=ask,
+                underlying=underlying_price,
+                strike=parts.strike,
+                days_to_expiry=days_to_expiration,
+                option_type=parts.contract_type,
+            )
+
+            if modelled is not None:
+                delta, delta_source = modelled, "model"
+
+        if iv is None:
+            modelled_iv = options_greeks.implied_volatility(
+                0.5 * (bid + ask), underlying_price, parts.strike,
+                days_to_expiration / 365.0,
+                options_greeks.DEFAULT_RISK_FREE_RATE, 0.0,
+                parts.contract_type,
+            )
+
+            if modelled_iv is not None:
+                iv, iv_source = modelled_iv, "model"
 
     return ContractQuote(
         symbol=symbol,
@@ -332,10 +403,10 @@ def snapshot_to_quote(
         bid=bid,
         ask=ask,
         delta=delta,
-        implied_volatility=_as_float(
-            getattr(snapshot, "implied_volatility", None)
-        ),
-        days_to_expiration=(parts.expiration - as_of).days,
+        implied_volatility=iv,
+        days_to_expiration=days_to_expiration,
+        delta_source=delta_source,
+        iv_source=iv_source,
     )
 
 
@@ -723,7 +794,9 @@ def fetch_chain_quotes(
     quotes = []
 
     for symbol, snapshot in (chain or {}).items():
-        quote = snapshot_to_quote(symbol, snapshot, as_of=reference_date)
+        quote = snapshot_to_quote(symbol, snapshot,
+                                  as_of=reference_date,
+                                  underlying_price=underlying_price)
 
         if quote is not None:
             quotes.append(quote)
@@ -1102,6 +1175,66 @@ def _self_test() -> int:
     # Raising the cap deliberately is the remedy, not measuring on the stop.
     raised, _ = spread_of(2.55, 1.00, risk=0.25)   # $155 net vs $162.50 cap
     check("raising the risk percent admits it again", raised is not None)
+
+    # -----------------------------------------------------------------
+    # Greeks solved locally when the feed will not supply them.
+    # 54% of contracts arrived with no delta on 2026-08-24, so the gate
+    # that picks the contract could not run on most of the chain.
+    # -----------------------------------------------------------------
+    print()
+    print("Greeks fall back to the model, and say so")
+
+    class _Q:
+        def __init__(self, bid, ask):
+            self.bid_price, self.ask_price = bid, ask
+
+    class _S:
+        def __init__(self, bid, ask, delta=None, iv=None):
+            self.latest_quote = _Q(bid, ask)
+            self.implied_volatility = iv
+            self.greeks = type("G", (), {"delta": delta})() if delta is not None else None
+
+    sym, day = "F260918C00014500", date(2026, 8, 24)
+
+    modelled = snapshot_to_quote(sym, _S(0.30, 0.32), as_of=day,
+                                 underlying_price=14.20)
+    check("a contract with no feed greeks still gets a delta",
+          modelled is not None and modelled.delta is not None,
+          str(modelled.delta if modelled else None))
+    check("and it is labelled as modelled, not measured",
+          modelled.delta_source == "model" and modelled.iv_source == "model",
+          f"{modelled.delta_source}/{modelled.iv_source}")
+    check("the modelled delta is in [0, 1] for a call",
+          0.0 <= modelled.delta <= 1.0, str(modelled.delta))
+
+    # The feed is the exchange's own number. A model must never overwrite it.
+    fed = snapshot_to_quote(sym, _S(0.30, 0.32, delta=0.55, iv=0.44),
+                            as_of=day, underlying_price=14.20)
+    check("a feed delta is preferred over the model",
+          fed.delta == 0.55 and fed.delta_source == "feed",
+          f"{fed.delta} {fed.delta_source}")
+    check("a feed IV is preferred over the model",
+          fed.implied_volatility == 0.44 and fed.iv_source == "feed",
+          f"{fed.implied_volatility} {fed.iv_source}")
+
+    # Widening coverage must never change behaviour where it already worked.
+    bare = snapshot_to_quote(sym, _S(0.30, 0.32), as_of=day)
+    check("without a spot price nothing changes",
+          bare.delta is None and bare.delta_source == "none",
+          f"{bare.delta} {bare.delta_source}")
+
+    # An expired or same-day contract has no time value to solve against.
+    expired = snapshot_to_quote(sym, _S(0.30, 0.32), as_of=date(2026, 9, 18),
+                                underlying_price=14.20)
+    check("a zero-day contract is not solved, and returns None not 0.0",
+          expired.delta is None, str(expired.delta))
+
+    # A put must come back with the opposite sign convention handled.
+    put = snapshot_to_quote("F260918P00014500", _S(0.30, 0.32), as_of=day,
+                            underlying_price=14.20)
+    check("a put also solves, and the gate reads its magnitude",
+          put.delta is not None and 0.0 <= abs(put.delta) <= 1.0,
+          str(put.delta if put else None))
 
     print()
 
