@@ -34,6 +34,17 @@
                 "BUY 2 SCHD @ limit 34.73 -> order 9a721aea-8b38-4267-9444-d15a5d6c4552",
                 "BUY 2 SCHG @ limit 36.19 -> order 38e711fb-e9ad-44fa-bd1e-6e2ad064c8f4"
             ]
+        },
+        {
+            "at": "2026-08-25T13:45:02+00:00",
+            "orders": [
+                "buy 2 SCHD",
+                "buy 2 SCHG"
+            ],
+            "results": [
+                "BUY 2 SCHD @ limit 35.35 -> order 1b47a76a-5066-40b1-8d9b-e3a92c7e7640",
+                "BUY 2 SCHG @ limit 35.75 -> order a27b8f9a-e9e7-48ea-8e69-4a7e4a828ffd"
+            ]
         }
     ]
 }

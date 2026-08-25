@@ -1546,7 +1546,7 @@ def run_options_scanner() -> OptionsScannerSummary:
         # whole cycle. Returns {} on any failure, so a measurement problem
         # cannot stop entries that would otherwise have happened.
         skew_rows = collect_skew(
-            trading_client, data_client, stock_data,
+            trading_client, option_data, stock_data,
             sorted({c["symbol"] for c in candidates}))
 
         # THE LIVE SWITCH. In shadow the order is untouched and skew is
@@ -3137,6 +3137,37 @@ def _self_test() -> int:
           str(junk))
 
     print()
+    print()
+    print("No undefined name survives into the live path")
+
+    # THE 2026-08-25 OUTAGE. collect_skew was called with `data_client`,
+    # a name that exists nowhere in this module -- the client is
+    # `option_data`. Every self-test passed, because none of them enter
+    # the market-open path, so the NameError only fired at 08:30:20 with
+    # the opening bell and killed the sole live entry path for the entire
+    # session. 3 attempts, self_repair, alert, every cycle, all day.
+    #
+    # The stop path stayed healthy, so nothing was left unprotected. That
+    # was luck of layout, not design.
+    #
+    # A unit test could not have caught it: the fault was a name only
+    # reachable when the market is open. A STATIC check catches it in a
+    # second and needs no market at all.
+    try:
+        import subprocess
+
+        flake = subprocess.run(
+            [sys.executable, "-m", "pyflakes", __file__],
+            capture_output=True, text=True, timeout=120)
+        undefined = [line for line in flake.stdout.splitlines()
+                     if "undefined name" in line.lower()]
+        check("pyflakes finds no undefined name in this module",
+              not undefined, "; ".join(undefined[:3]))
+    except Exception as error:                              # noqa: BLE001
+        # A missing checker must not silently pass. If it cannot run, the
+        # guarantee does not exist and the test says so.
+        check(f"the static check itself ran ({type(error).__name__})", False)
+
     print()
     print("Skew columns are appended, never inserted")
 
