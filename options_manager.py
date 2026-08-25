@@ -757,13 +757,26 @@ def build_close_request(
 # ---------------------------------------------------------------------------
 
 def initialize_completed_file() -> Path:
-    """Create the options completed-trades file when needed."""
+    """Create or MIGRATE the options completed-trades journal.
 
-    if OPTIONS_COMPLETED_FILE.exists():
-        return OPTIONS_COMPLETED_FILE
+    Migration was missing here until 2026-08-25, and it cost real data.
+    entry_delta was appended to COMPLETED_COLUMNS on 08-23 and
+    entry_spread_percent on 08-25, while the file's header still ended at
+    paper_trade. DictWriter kept writing 19 fields into a 17-column file,
+    so the surplus landed in an unnamed overflow column: three rows --
+    TLT, SOFI, SCHD -- carried their entry delta in a field with no name.
 
-    with OPTIONS_COMPLETED_FILE.open("w", newline="", encoding="utf-8") as handle:
-        csv.DictWriter(handle, fieldnames=COMPLETED_COLUMNS).writeheader()
+    This is the column-shift class csv_schema was written to close, and it
+    had been applied to shadow_trades, the scanner shadow log and
+    options_shadow while THIS file, the one every P&L figure in the
+    project is computed from, was left out of the conversion.
+
+    Found by LOCKBOT reading its own state snapshot, not by any test here.
+    """
+
+    from csv_schema import ensure_schema
+
+    ensure_schema(OPTIONS_COMPLETED_FILE, COMPLETED_COLUMNS)
 
     return OPTIONS_COMPLETED_FILE
 
@@ -823,12 +836,46 @@ def record_completed_option_trade(
             else f"{position.entry_spread_percent:.4f}"),
     }
 
-    with OPTIONS_COMPLETED_FILE.open("a", newline="", encoding="utf-8") as handle:
-        csv.DictWriter(
-            handle,
-            fieldnames=COMPLETED_COLUMNS,
-            extrasaction="ignore",
-        ).writerow(row)
+    # THE BOUNDARY, and it is the safety-critical part of this function.
+    #
+    # A journal that cannot be written is a REPORTING failure. A stop that
+    # does not run is unprotected capital. Those must never be the same
+    # outcome, so a SchemaRefused here is caught, alerted and swallowed --
+    # the exit has already happened at the broker by the time this runs,
+    # and raising would abort the caller mid-exit for a bookkeeping fault.
+    #
+    # It is loud rather than silent: an unjournalled trade is invisible to
+    # every performance figure, which is how a -$23 loss was once recorded
+    # as breakeven and blocked a morning's trading on a fabricated number.
+    try:
+        initialize_completed_file()
+
+        with OPTIONS_COMPLETED_FILE.open(
+                "a", newline="", encoding="utf-8") as handle:
+            csv.DictWriter(
+                handle,
+                fieldnames=COMPLETED_COLUMNS,
+                extrasaction="ignore",
+            ).writerow(row)
+    except Exception as error:                              # noqa: BLE001
+        print(f"  JOURNAL WRITE FAILED for {position.underlying}: "
+              f"{type(error).__name__}: {error}. The EXIT still stands; "
+              "this trade is missing from the performance record.")
+
+        try:
+            from notifications import send_smart_notification
+
+            send_smart_notification(
+                "LOCKBOT: options trade not journalled",
+                f"{position.underlying} exited at ${exit_credit:.2f} but the "
+                f"journal write failed ({type(error).__name__}). The position "
+                "IS closed at the broker. Performance figures are incomplete "
+                "until this row is restored.",
+                priority=1,
+                cooldown_minutes=60,
+            )
+        except Exception:                                   # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1981,6 +2028,10 @@ def print_summary(summary: OptionsManagerSummary) -> None:
 # Self-test
 # ---------------------------------------------------------------------------
 
+def _module_source() -> str:
+    return Path(__file__).read_text(encoding="utf-8")
+
+
 def _self_test() -> int:
     """Offline checks of the exit logic. No network, no credentials."""
 
@@ -2546,6 +2597,33 @@ def _self_test() -> int:
     # underlying terms -- it tightened when the floor dropped 0.35 -> 0.20
     # on 08-23, without anybody deciding to move it.
     check("the journal carries entry_delta", "entry_delta" in COMPLETED_COLUMNS)
+
+    # THE 08-25 COLUMN SHIFT. entry_delta was added to COMPLETED_COLUMNS on
+    # 08-23 and entry_spread_percent on 08-25, while the file header still
+    # ended at paper_trade. DictWriter wrote 19 fields into 17 columns and
+    # three rows carried their entry delta in an unnamed overflow field.
+    # This is the file every P&L figure is computed from, and it was the
+    # one csv_schema conversion that was skipped.
+    import inspect
+
+    check("the journal writer goes through csv_schema",
+          "ensure_schema" in inspect.getsource(initialize_completed_file),
+          "initialize_completed_file must MIGRATE, not merely create")
+
+    # A journal that cannot be written is a REPORTING failure. A stop that
+    # does not run is unprotected capital. They must never be one outcome.
+    #
+    # Checked on CODE lines only. An earlier version of this test matched
+    # the word "raising" inside its own explanatory comment and failed a
+    # correct implementation -- a test that reads prose is testing prose.
+    writer = inspect.getsource(record_completed_option_trade)
+    code = [line.split("#")[0] for line in writer.splitlines()]
+    check("a failed journal write cannot abort the exit",
+          any("except Exception" in line for line in code)
+          and not any(line.strip().startswith("raise") for line in code),
+          "SchemaRefused must be caught here, never propagated")
+    check("and it is loud rather than silent",
+          "send_smart_notification" in writer)
 
     p_with = OptionPosition(
         position_id="d1", underlying="T", strategy="LONG_CALL",
