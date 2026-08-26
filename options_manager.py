@@ -341,8 +341,29 @@ def current_exit_value(
     if long_quote is None:
         return None
 
-    long_bid, _ = long_quote
+    long_bid, long_ask = long_quote
     value = long_bid
+
+    # A ZERO BID IS NOT A PRICE, IT IS AN EMPTY BOOK.
+    #
+    # PFE261002C00030500 on 2026-08-26: bid 0.00 against an ask of 0.25,
+    # on a call 2.18 out of the money with five weeks to run. The stop had
+    # confirmed on an earlier, real quote; by the time the order was
+    # priced the bid had gone. The single-leg path clamped it to
+    # max(bid, 0.01) and submitted a SELL AT ONE CENT for a contract with
+    # roughly $12.50 of mid value. It sat unfilled overnight, which is the
+    # only reason it cost nothing.
+    #
+    # The spread path already refused exactly this and said so at length.
+    # The fix was applied there and not here -- and spreads were disabled
+    # on 08-23, so the correction lived on the path that no longer runs
+    # while every trade LOCKBOT actually makes kept the defect.
+    #
+    # Fixed at the VALUATION rather than in build_close_request, so the
+    # stop decision and the order price stay one number. Fixing the order
+    # builder alone would have been a fourth copy of the same quantity.
+    if long_bid <= 0 and long_ask > 0:
+        return None
 
     if position.is_spread:
         short_quote = _quote_pair(quotes.get(position.short_symbol))
@@ -700,13 +721,26 @@ def build_close_request(
     long_bid, _ = long_quote
 
     if not position.is_spread:
+        # The SAME valuation the stop decision used, for the same reason
+        # the spread path below uses it: a book this cannot trust is one
+        # it must not price against. max(long_bid, 0.01) used to live here
+        # and turned an empty book into a one-cent sale.
+        credit = exit_value_per_share(position, quotes)
+
+        if credit is None or credit <= 0:
+            raise ValueError(
+                f"{position.underlying}: bid {long_bid:.2f} is no quote to "
+                "price it against. Refusing to sell into an empty book; "
+                "will retry next cycle."
+            )
+
         return LimitOrderRequest(
             symbol=position.long_symbol,
             qty=position.contracts,
             side=OrderSide.SELL,
             type="limit",
             time_in_force=TimeInForce.DAY,
-            limit_price=round(max(long_bid, 0.01), 2),
+            limit_price=round(credit, 2),
             position_intent=PositionIntent.SELL_TO_CLOSE,
         )
 
@@ -2596,6 +2630,50 @@ def _self_test() -> int:
     # delta x underlying / premium, so +50/-35 is not a fixed band in
     # underlying terms -- it tightened when the floor dropped 0.35 -> 0.20
     # on 08-23, without anybody deciding to move it.
+    print()
+    print("An empty book is not a price -- SINGLE LEGS, the live path")
+
+    class _Q:
+        def __init__(self, bid, ask):
+            self.bid_price, self.ask_price = bid, ask
+
+    leg = OptionPosition(
+        position_id="t", underlying="PFE", strategy="LONG_CALL",
+        long_symbol="PFE261002C00030500", contracts=1, entry_debit=22.0,
+        entry_time="2026-08-26T17:25:25+00:00", expiration="2026-10-02")
+
+    def priced(bid, ask):
+        quotes = {"PFE261002C00030500": _Q(bid, ask)}
+        try:
+            return build_close_request(leg, quotes).limit_price
+        except ValueError:
+            return None
+
+    # THE 2026-08-26 CASE. bid 0.00 against a 0.25 ask, on a call 2.18 out
+    # of the money with five weeks left -- roughly $12.50 of mid value.
+    # The old single-leg path was max(long_bid, 0.01) and submitted a SELL
+    # AT ONE CENT. It sat unfilled overnight, which is the only reason it
+    # cost nothing. The SPREAD path already refused this; the fix had been
+    # applied there and not here, and spreads were disabled three days
+    # later, so the correction lived on the path that no longer runs.
+    check("a zero bid against a live ask values as None",
+          current_exit_value(leg, {"PFE261002C00030500": _Q(0.00, 0.25)})
+          is None)
+    check("and no order is built for it", priced(0.00, 0.25) is None)
+    check("no market at all is also refused", priced(0.00, 0.00) is None)
+
+    # It must not become a rule that never sells. A real bid, however
+    # small, is a real price and the stop must still be able to act.
+    check("a real bid still prices the exit", priced(0.12, 0.25) == 0.12,
+          str(priced(0.12, 0.25)))
+    check("a genuinely cheap contract with a real bid still sells",
+          priced(0.01, 0.02) == 0.01, str(priced(0.01, 0.02)))
+
+    # The whole point of exit_value_per_share: one number, not two.
+    check("the order price equals the valuation the stop used",
+          priced(0.12, 0.25) == exit_value_per_share(
+              leg, {"PFE261002C00030500": _Q(0.12, 0.25)}))
+
     check("the journal carries entry_delta", "entry_delta" in COMPLETED_COLUMNS)
 
     # THE 08-25 COLUMN SHIFT. entry_delta was added to COMPLETED_COLUMNS on

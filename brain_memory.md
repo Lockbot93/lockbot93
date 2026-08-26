@@ -568,3 +568,27 @@ safe to edit or prune by hand.
 - **2026-08-25 21:12** — 2026-08-26 ruling on owner's counter-regime put proposal (bearish signal on uptrending name): declined as capital rule — it is a partial inversion of detect_signal (live 33.8 vs full inversion 33.5 = zero information; signal 32.9% vs random 36.7% p=0.0002) and the 13/150 shadow-short record lowers but does not settle it (different cohort); APPROVED shadow-only logging of counter-regime setups at the choose_strategy drop point (46169c86 pattern, judge vs breakeven + seeded control at n>=30), with caveat that REGIME_OPPOSES_SHORT ran 3/4000 rows so expect MEASUREMENT_STALLED; redirected the owner's curiosity to the approved skew-rank signal and 24e5b01d candidate resolution as the genuinely new inputs.
 
 - **2026-08-25 23:09** — 2026-08-26 answer to owner's learn-and-grow question: the named structural blind spot is gate censorship — shadow logging resolves only APPROVED setups, so rejection gates (regime blocks, timeframe alignment, spread gate killing 8,007/10,771 contracts) are unfalsifiable from own data; proposed fix is a rejection-counterfactual sampler (resolve a sample of rejected setups per rejection reason, the 46169c86 pattern generalised); also ruled the biggest constraint remains the no-information entry signal (32.9% vs 36.7% random), and told the owner that cutting registered parameters before n=30 (cooldown 5→1 after one day, loss limit to ceiling, spreads off) stalls every registry verdict permanently.
+
+- **2026-08-26 15:32** — FAILURE: The Options Scanner crash loop (841 exits, 210 failed self-repairs) is confined entirely to 08-25; 08-26 ran clean with five entry attempts submitted, so it is not recurring across sessions — but no cause or fix is on record, so it is survived, not handled.
+
+- **2026-08-26 15:32** — FAILURE: NEW LOCKBOT defect: the PFE long call's stop fired (stop_strikes=3, exit_reason STOP_LOSS, exit_order_id set) but the exit order EXPIRED unfilled at the broker at 19:55Z 08-26 and the position is still tracked open — a fired stop was carried overnight because the exit path apparently never monitors or re-submits its own close order; unhandled and live right now.
+
+- **2026-08-26 15:32** — FAILURE: The untracked-position class recurred: OPTIONS_MANAGER and RECONCILIATION are both DEGRADED at 08-26 20:00Z on 2 untracked option positions with no software stop — second occurrence after XLF 08-19; the 50d2f36d alert mitigation is working as designed, but whether this is the recorded UNKNOWN-after-cancel residual (three ENTRY_NOT_FILLED bookings happened on 08-26) or owner manual trades cannot be split from this state.
+
+- **2026-08-26 15:32** — FAILURE: order_expired ran 4 times 08-24→08-26: the entry-side events are the known quote-staleness no-fill class (approved bounded re-attempt fix still unshipped — LOCKBOT-side, recurring, recorded), while the PFE event is the new exit-expiry sub-class above.
+
+- **2026-08-26 15:32** — FAILURE: The 5 DNS-resolution cycle crashes 08-24/25 are the environment failing, absorbed correctly by the retry loop — handled.
+
+- **2026-08-26 15:32** — OPTIONS_MAX_SPREAD_PERCENT has moved 0.05→0.08 in config, and the 08-26 XLF long call entered at a persisted 7.4% spread — the first live entry inside the newly opened 5–8% band, so the recommended spread-band cohort-split registry floor (5–8% band vs <5% band at n≥30) must now be active, and entry_spread_percent/entry_delta are persisting on tracked positions.
+
+- **2026-08-26 15:32** — PFE261002C00030500's stop-loss exit order expired unfilled at 19:55Z on 08-26 with the position still tracked open — the first instance ever of a fired stop failing to close because its exit order lapsed at end of day, leaving the position exposed overnight past its stop.
+
+- **2026-08-26 15:32** — Two untracked option positions are live at the broker as of 08-26 20:00Z (OPTIONS_MANAGER and RECONCILIATION both DEGRADED), the second occurrence of the untracked class, and they carry no software stop.
+
+- **2026-08-26 15:32** — Shadow resolved grew 517→561 with only 1 win in the marginal 44 (uptrend longs 0-for-30 marginal); cumulative 104/561 (18.5%, −0.444R), and zero new EXPIRED rows booked in the same window.
+
+- **2026-08-26 15:32** — The realized options ledger on this account is now 0 wins in 10 closed trades at −$266: the TLT bear put spread stopped −25.9% (−$7) on 08-24 and the F long call stopped −31.0% (−$9) on 08-26 — the single-leg cohort's first resolution, within the −35% threshold (no overshoot), n=1 toward its registered n≥30 floor; equity is $343.83, −47.1% from the $650 start.
+
+- **2026-08-26 15:32** — 3 of 5 option entry attempts on 08-26 booked ENTRY_NOT_FILLED (TLT ×2, CMCSA) — the quote-staleness no-fill class ran at 60% for the day while the approved bounded re-attempt fix remains unshipped.
+
+- **2026-08-26 17:44** — 2026-08-26 PFE penny-exit ruling: single-leg build_close_request clamps a zero bid to a 0.01 sell (spread path refuses via exit_value_per_share, singles kept the pre-08-21 bug); ruled cancel the live 0.01 order AND ship the fix at the VALUATION (non-positive bid → None for singles, so the value-is-None retry branch handles it) BEFORE the next manager cycle or it re-submits; no fair-value floor (mid-pricing stops was rejected 08-19; worst case of refusal is ~$1/contract via expiry after MAX_HOLD/NEAR_EXPIRY can't submit on a None value); a penny fill would contaminate the strike-event registry and the single-leg cohort floor with a −95% artifact row.
