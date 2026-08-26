@@ -959,6 +959,45 @@ def _order_status_text(order: Any) -> str:
     return str(getattr(order.status, "value", order.status)).lower()
 
 
+def classify_exit_order(trading_client: Any, position: OptionPosition) -> str:
+    """What happened to this position's EXIT order.
+
+    FILLED / WORKING / DEAD / UNKNOWN, on the same terminal-status set as
+    the entry classifier so the two cannot drift apart.
+
+    UNKNOWN reports WORKING, deliberately and unlike the entry side. An
+    unreadable exit order might still be live, and cancelling-then-
+    resubmitting on a guess risks a double sale; leaving it and retrying
+    costs a cycle. The entry side had the opposite asymmetry -- there,
+    dropping a position removed its only stop -- and getting that
+    backwards is what cost two positions their protection on 08-26.
+    """
+
+    if not position.exit_order_id:
+        return "UNKNOWN"
+
+    try:
+        order = trading_client.get_order_by_id(position.exit_order_id)
+    except Exception:                                       # noqa: BLE001
+        return "WORKING"
+
+    status = _order_status_text(order)
+
+    if status in FILLED_ORDER_STATUSES:
+        return "FILLED"
+
+    try:
+        if float(order.filled_qty or 0) > 0:
+            return "FILLED"
+    except (TypeError, ValueError):
+        pass
+
+    if status in TERMINAL_WITHOUT_FILL:
+        return "DEAD"
+
+    return "WORKING"
+
+
 def classify_entry_order(trading_client: Any, position: OptionPosition) -> str:
     """Resolve what actually happened to a position's entry order.
 
@@ -1870,6 +1909,61 @@ def run_options_manager() -> OptionsManagerSummary:
                 except Exception:                       # noqa: BLE001
                     pass
 
+                # THE EXIT SIDE OF de5cc757: classify our OWN exit order.
+                #
+                # Nothing re-read a submitted exit order while the position
+                # was still held. Exits are TIF=day -- Alpaca offers no GTC
+                # on options -- so an unfilled close EXPIRES at the bell,
+                # and the next cycle inherits an exit_order_id pointing at
+                # a dead order.
+                #
+                # The re-chase below only runs when decide_exit says exit
+                # AGAIN. On an empty book current_exit_value returns None,
+                # decide_exit cannot evaluate price and returns HOLD, and a
+                # stop that HAD fired is silently forgotten while the stale
+                # id sits in state. That is exactly the PFE case of
+                # 2026-08-26, and it is the entry-side defect mirrored:
+                # believing a stale record instead of asking the broker.
+                if position.exit_order_id:
+                    exit_verdict = classify_exit_order(trading_client, position)
+
+                    if exit_verdict == "DEAD":
+                        stale = position.exit_order_id
+                        had_fired = position.exit_reason
+                        position.exit_order_id = None
+                        summary.errors += 1
+
+                        print(
+                            f"{position.underlying}: exit order {stale[:8]} is "
+                            f"dead without filling and the position is STILL "
+                            f"HELD. Clearing it so the exit can re-fire"
+                            + (f" ({had_fired} had already fired)."
+                               if had_fired else ".")
+                        )
+
+                        # An immediate page, not a counter. A fired stop
+                        # that did not execute is unprotected capital, and
+                        # every defect this week was one the manager knew
+                        # about and nobody was told.
+                        try:
+                            from notifications import send_smart_notification
+
+                            send_smart_notification(
+                                "LOCKBOT: exit order expired unfilled",
+                                f"{position.underlying} "
+                                f"{position.long_symbol} is still held and "
+                                f"its exit order died without filling"
+                                + (f" after {had_fired} fired." if had_fired
+                                   else ".")
+                                + " The position is being re-evaluated this "
+                                  "cycle. If its book is empty the exit will "
+                                  "keep refusing rather than sell into it.",
+                                priority=1,
+                                cooldown_minutes=60,
+                            )
+                        except Exception:               # noqa: BLE001
+                            pass
+
                 label = f"{position.underlying} {position.strategy}"
 
                 if not decision.should_exit:
@@ -2702,6 +2796,67 @@ def _self_test() -> int:
     # delta x underlying / premium, so +50/-35 is not a fixed band in
     # underlying terms -- it tightened when the floor dropped 0.35 -> 0.20
     # on 08-23, without anybody deciding to move it.
+    print()
+    print("A dead exit order on a HELD position is cleared, not believed")
+
+    # Imported here rather than relying on the later `import inspect` in
+    # this same function -- a name bound further down is still a LOCAL,
+    # and referencing it earlier is an UnboundLocalError, not a fallback
+    # to the module scope.
+    import inspect
+
+    class _O2:
+        def __init__(self, status, qty=0):
+            self.status, self.filled_qty = status, qty
+
+    class _C2:
+        def __init__(self, order): self._o = order
+        def get_order_by_id(self, _): 
+            if self._o is None:
+                raise RuntimeError("lookup failed")
+            return self._o
+
+    held = OptionPosition(
+        position_id="e", underlying="PFE", strategy="LONG_CALL",
+        long_symbol="PFE261002C00030500", contracts=1, entry_debit=22.0,
+        entry_time="2026-08-26T17:25:25+00:00", expiration="2026-10-02",
+        exit_order_id="abc123")
+
+    for status in ("expired", "canceled", "rejected", "done_for_day"):
+        check(f"an exit that {status} without filling is DEAD",
+              classify_exit_order(_C2(_O2(status)), held) == "DEAD")
+
+    check("a live exit is WORKING",
+          classify_exit_order(_C2(_O2("accepted")), held) == "WORKING")
+    check("a filled exit is FILLED",
+          classify_exit_order(_C2(_O2("filled", 1)), held) == "FILLED")
+    check("a partial fill counts as FILLED, not working",
+          classify_exit_order(_C2(_O2("pending_cancel", 1)), held) == "FILLED")
+
+    # The asymmetry against the ENTRY side is deliberate and is the whole
+    # lesson of 08-26: there, an unreadable order was treated as dead and
+    # two positions lost their stops. Here, an unreadable order might still
+    # be live, and acting on a guess risks selling twice.
+    check("an UNREADABLE exit reports WORKING, never DEAD",
+          classify_exit_order(_C2(None), held) == "WORKING")
+    check("no exit id is UNKNOWN, not DEAD",
+          classify_exit_order(_C2(_O2("filled")), OptionPosition(
+              position_id="n", underlying="X", strategy="LONG_CALL",
+              long_symbol="X", contracts=1, entry_debit=1.0,
+              entry_time="2026-08-26T00:00:00+00:00",
+              expiration="2026-10-02")) == "UNKNOWN")
+
+    # One terminal set, not two. The entry and exit classifiers must never
+    # disagree about what "dead" means.
+    check("both classifiers share one definition of terminal",
+          "TERMINAL_WITHOUT_FILL" in inspect.getsource(classify_exit_order)
+          and "TERMINAL_WITHOUT_FILL" in inspect.getsource(
+              classify_entry_order))
+
+    live = _module_source().split("def _self_test")[0]
+    check("a dead exit on a held position pages immediately",
+          "exit order expired unfilled" in live)
+
     print()
     print("A contract the BROKER HOLDS is never booked as never-filled")
 
