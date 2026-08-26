@@ -968,9 +968,23 @@ def classify_entry_order(trading_client: Any, position: OptionPosition) -> str:
       DEAD     - cancelled, rejected or expired without filling; no trade
       UNKNOWN  - no order id, or the lookup failed
 
-    UNKNOWN deliberately falls back to the old "treat as closed" behaviour.
-    A position we cannot verify is one we should stop tracking, because the
-    alternative is holding a slot open forever on a guess.
+    UNKNOWN once fell back to "treat as closed", on the reasoning that a
+    position we cannot verify is one we should stop tracking rather than
+    hold a slot open forever on a guess.
+
+    THAT REASONING WAS WRONG AND IT COST TWO POSITIONS THEIR STOPS on
+    2026-08-26. A failed lookup -- a rate limit, a timeout, a blip -- is
+    not evidence that nothing was bought, and for options, dropping a
+    position removes the only stop that exists. Holding a slot wrongly
+    costs an opportunity; dropping a held position wrongly costs
+    protection. The costs are not equal and the fallback treated them as
+    if they were.
+
+    The caller now checks the broker's own position list before booking
+    ENTRY_NOT_FILLED on any verdict, so an UNKNOWN on a contract that is
+    actually held is adopted rather than written off. This function still
+    reports UNKNOWN honestly; what changed is what UNKNOWN is allowed to
+    licence.
     """
 
     if not position.entry_order_id:
@@ -1523,6 +1537,64 @@ def run_options_manager() -> OptionsManagerSummary:
                     # UNKNOWN falls through with DEAD to the booking path
                     # below, which is the pre-existing behaviour for an
                     # order that cannot be read at all.
+
+                # NEVER BOOK "NOT FILLED" FOR A CONTRACT THE BROKER HOLDS.
+                #
+                # 2026-08-26: TLT260918P00081500 and TLT260925P00081000 both
+                # FILLED -- status=filled, qty 1, at 0.36 and 0.35 -- and both
+                # were journalled ENTRY_NOT_FILLED and dropped from tracking.
+                # $71 sat unwatched for hours. Options have no broker-side
+                # stop, so untracked means unprotected.
+                #
+                # The route was classify_entry_order returning UNKNOWN, which
+                # its own docstring says "deliberately falls back to the old
+                # treat-as-closed behaviour", reasoning that a position we
+                # cannot verify is one we should stop tracking rather than
+                # hold a slot open on a guess. A failed lookup -- a rate
+                # limit, a timeout, a blip -- therefore abandons a real
+                # position.
+                #
+                # THE TWO COSTS ARE NOT EQUAL. Holding a slot wrongly costs an
+                # opportunity. Dropping a held position wrongly costs the only
+                # stop it has. The broker's own position list settles it, and
+                # it is already loaded here, so this asks it before writing a
+                # trade that says nothing was bought.
+                if verdict == "DEAD" and position.long_symbol in broker_positions:
+                    position.entry_filled = True
+
+                    filled = entry_debit_from_order(
+                        _entry_order(trading_client, position))
+
+                    if filled is not None and filled > 0:
+                        position.entry_debit = filled
+                        position.highest_value = filled
+
+                    print(
+                        f"{position.underlying}: the order reads dead or "
+                        f"unreadable, but the BROKER HOLDS "
+                        f"{position.long_symbol}. Keeping it tracked and "
+                        f"protected at ${position.entry_debit:.2f} rather "
+                        "than journaling a trade that did not happen."
+                    )
+
+                    try:
+                        from notifications import send_smart_notification
+
+                        send_smart_notification(
+                            "LOCKBOT: entry adopted despite a dead order",
+                            f"{position.underlying} {position.long_symbol} is "
+                            "held at the broker while its entry order reads "
+                            "dead or unreadable. Kept under the software stop "
+                            "instead of being written off. Worth checking why "
+                            "the order could not be resolved.",
+                            priority=0,
+                            cooldown_minutes=120,
+                        )
+                    except Exception:                       # noqa: BLE001
+                        pass
+
+                    summary.entries_confirmed += 1
+                    continue
 
                 if verdict == "DEAD":
                     # No trade happened. Journal it at cost so it stays
@@ -2630,6 +2702,43 @@ def _self_test() -> int:
     # delta x underlying / premium, so +50/-35 is not a fixed band in
     # underlying terms -- it tightened when the floor dropped 0.35 -> 0.20
     # on 08-23, without anybody deciding to move it.
+    print()
+    print("A contract the BROKER HOLDS is never booked as never-filled")
+
+    # 2026-08-26: two TLT puts filled, were journalled ENTRY_NOT_FILLED,
+    # and sat untracked and unprotected for hours. The route was
+    # classify_entry_order returning UNKNOWN on a failed lookup, which
+    # fell through to DEAD.
+    import inspect
+
+    # Everything BEFORE the self-test. This block searches for marker
+    # strings that also appear in the search expressions themselves, so a
+    # whole-file haystack matches the test rather than the code -- which
+    # it duly did on the first two attempts here.
+    loop = _module_source().split("def _self_test")[0]
+    check("the DEAD path consults the broker's position list first",
+          'verdict == "DEAD" and position.long_symbol in broker_positions'
+          in loop,
+          "a held contract must never be journalled ENTRY_NOT_FILLED")
+    check("and adopts it rather than dropping it",
+          "Keeping it tracked and" in loop)
+    # `>= 0` is always true. That check could not fail and was therefore
+    # not a check -- caught before commit, but it is the same shape as the
+    # risk_engine tests that passed for four days while asserting nothing.
+    # Bounded by the two comment markers rather than by code punctuation,
+    # which is what made the first attempt at this slice unreliable.
+    adopt_block = loop.split("NEVER BOOK")[-1].split("No trade happened")[0]
+    check("re-deriving the basis from the ORDER, not the quote",
+          "entry_debit_from_order" in adopt_block, adopt_block[:60])
+    check("and it keeps the slot rather than refunding it",
+          "refund_daily_trade_slot" not in adopt_block)
+
+    # The asymmetry is the whole argument and must stay written down: a
+    # wrongly-held slot costs an opportunity, a wrongly-dropped position
+    # costs the only stop it has.
+    check("the reasoning is recorded, not just the code",
+          "THE TWO COSTS ARE NOT EQUAL" in loop)
+
     print()
     print("An empty book is not a price -- SINGLE LEGS, the live path")
 
