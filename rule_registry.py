@@ -1017,6 +1017,20 @@ def report(review: Review) -> None:
         print("  A RULE IS COSTING MONEY. That verdict is the whole point of")
         print("  this module; acting on it is the owner's call, never mine.")
     elif all(r.status == ACCUMULATING for r in review.rules):
+        # WHICH ACCOUNT THESE COUNTS CAME FROM. The per-trade ceiling is
+        # 10% of equity, so it moved from ~$34 to ~$75 on the 08-26 reset
+        # without a setting changing -- which changes WHICH CONTRACTS were
+        # reachable and therefore what population these floors are
+        # counting. Two of the six rules carry data from before it and
+        # SPLIT rather than reset; printing the generation is what stops a
+        # later reader adding the halves together.
+        generation = getattr(config, "CAPITAL_GENERATION", None)
+
+        if generation:
+            print(f"  capital generation: {generation} — counts from an"
+                  " earlier generation are split, never pooled")
+            print()
+
         print("  Nothing judgeable yet. Every floor was set before the data")
         print("  arrived, which is the only reason a verdict will mean")
         print("  anything when it comes.")
