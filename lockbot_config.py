@@ -1337,6 +1337,20 @@ OPTIONS_REQUIRE_NONZERO_BID = True
 # SHADOW UNTIL IT EARNS CAPITAL. Nothing enters on skew while this is
 # False; it computes, ranks and logs. The owner can set it True -- his
 # account, his call -- and the pre-registered bar does not move if he does.
+# The capital generation this account is in. Every registry row and
+# cohort split is tagged with it, so measurements taken at a $344 ceiling
+# are never silently pooled with measurements taken at $750.
+#
+# The ceiling is 10% of equity, so it moved from about $34 to $75 without
+# any setting changing. That un-censors the top of the quality sort --
+# on 2026-08-26 the scanner refused WDAY (q 76.6), EMB (50.3) and TEAM
+# (50.8) on price and bought TLT (48.6), CMCSA (21.3) and PFE (23.7)
+# instead. It buys MEASUREMENT, not edge: the signal is still measured
+# worse than random and larger positions lose faster in dollars.
+#
+# gen1_344 ended 2026-08-26 at $344.31, 10 closed trades, 0 wins, -$266.
+CAPITAL_GENERATION = "gen2_750"
+
 OPTIONS_SKEW_ENABLED = True
 OPTIONS_SKEW_LIVE = False
 
