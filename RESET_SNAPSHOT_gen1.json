@@ -1,0 +1,100 @@
+{
+  "captured_at": "2026-08-27T01:00:51+00:00",
+  "reason": "final state of the pre-$750 account, per the reset preconditions",
+  "account_number": "PA3CE9V6Q6BZ",
+  "equity": 344.31,
+  "cash": 78.15,
+  "last_equity": 381.15,
+  "options_level": 3,
+  "positions": [
+    {
+      "symbol": "NOK260918C00011000",
+      "qty": "1",
+      "cost_basis": 29.0,
+      "market_value": 37.0,
+      "unrealized_pl": 8.0,
+      "asset_class": "us_option",
+      "reserved": false
+    },
+    {
+      "symbol": "PFE261002C00030500",
+      "qty": "1",
+      "cost_basis": 22.0,
+      "market_value": 0.0,
+      "unrealized_pl": -22.0,
+      "asset_class": "us_option",
+      "reserved": false
+    },
+    {
+      "symbol": "SCHD",
+      "qty": "2",
+      "cost_basis": 70.04,
+      "market_value": 70.04,
+      "unrealized_pl": 0.0,
+      "asset_class": "us_equity",
+      "reserved": true
+    },
+    {
+      "symbol": "SCHG",
+      "qty": "2",
+      "cost_basis": 70.82,
+      "market_value": 71.12,
+      "unrealized_pl": 0.3,
+      "asset_class": "us_equity",
+      "reserved": true
+    },
+    {
+      "symbol": "TLT260918P00081500",
+      "qty": "1",
+      "cost_basis": 36.0,
+      "market_value": 33.0,
+      "unrealized_pl": -3.0,
+      "asset_class": "us_option",
+      "reserved": false
+    },
+    {
+      "symbol": "TLT260925P00081000",
+      "qty": "1",
+      "cost_basis": 35.0,
+      "market_value": 31.0,
+      "unrealized_pl": -4.0,
+      "asset_class": "us_option",
+      "reserved": false
+    },
+    {
+      "symbol": "XLF260918C00060000",
+      "qty": "1",
+      "cost_basis": 26.0,
+      "market_value": 24.0,
+      "unrealized_pl": -2.0,
+      "asset_class": "us_option",
+      "reserved": false
+    }
+  ],
+  "settings": {
+    "OPTIONS_MAX_RISK_PER_TRADE_PERCENT": 0.1,
+    "OPTIONS_MAX_SPREAD_PERCENT": 0.08,
+    "OPTIONS_TARGET_DELTA_MIN": 0.2,
+    "OPTIONS_TARGET_DELTA_MAX": 0.6,
+    "OPTIONS_TAKE_PROFIT_PERCENT": 0.5,
+    "OPTIONS_STOP_LOSS_PERCENT": 0.35,
+    "OPTIONS_MAX_OPEN_POSITIONS": 3,
+    "OPTIONS_MAX_TRADES_PER_DAY": 4,
+    "OPTIONS_MAX_SIDE_PREMIUM_PERCENT": 0.15,
+    "OPTIONS_MAX_IMPLIED_VOLATILITY": 1.0,
+    "OPTIONS_LOSS_COOLDOWN_SESSIONS": 1,
+    "OPTIONS_ALLOW_SPREADS": false,
+    "OPTIONS_SKEW_ENABLED": true,
+    "OPTIONS_SKEW_LIVE": false,
+    "ETF_PORTFOLIO_BUDGET": 160.0
+  },
+  "capital_generation": "gen1_344",
+  "next_generation": "gen2_750",
+  "ledger": {
+    "closed_trades": 10,
+    "wins": 0,
+    "realised_pnl": -266.0,
+    "journal_rows_total": 15
+  },
+  "tracked_options": 5
+}
