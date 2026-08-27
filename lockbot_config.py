@@ -963,6 +963,24 @@ OPTIONS_EXIT_SETTLE_SECONDS = 20
 # the position was journaled as a total loss while the order stayed live,
 # so a later fill would have created an option position with no software
 # stop. Cancelling bounds both problems.
+# How many times one underlying may be SUBMITTED for entry in a day,
+# filled or not. LOCKBOT's 08-25 fill ruling permits a re-attempt on a
+# fresh quote -- a stale displayed ask is the likeliest reason an order
+# priced AT that ask never fills -- but bounds it.
+#
+# WHY A BOUND WAS NEEDED AT ALL. When an entry is written off as
+# ENTRY_NOT_FILLED the position is deleted, which releases the name, and
+# the daily trade slot is refunded in the same pass. So the retry path was
+# already open and completely unlimited. On 2026-08-26 three of five
+# entries did not fill; one stubborn name could have spent the whole
+# session retrying itself while genuinely fillable setups went untaken.
+#
+# Counted on SUBMISSION rather than on failure, so a filled order also
+# spends an attempt. That keeps it a cap on TRIES rather than a cap on
+# disappointments -- the second would let a name that fills, stops out and
+# re-qualifies cycle round again indefinitely.
+OPTIONS_MAX_ENTRY_ATTEMPTS = 2
+
 OPTIONS_ENTRY_FILL_TIMEOUT_MINUTES = 15
 
 # How far above the ask an entry limit is placed. A limit at exactly the

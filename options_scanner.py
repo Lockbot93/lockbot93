@@ -186,7 +186,15 @@ def load_options_risk_state() -> dict[str, Any]:
     """Read the options daily-trade counter, resetting it on a new date."""
 
     today = datetime.now().astimezone().date().isoformat()
-    default = {"trade_date": today, "trades_submitted_today": 0}
+    # entry_attempts counts SUBMISSIONS per underlying today, filled or
+    # not. Without it a name whose orders never fill can be retried
+    # without limit: the position is deleted when an entry is written off
+    # ENTRY_NOT_FILLED, which releases the name, and the daily trade slot
+    # is refunded at the same time. On 2026-08-26 three of five entries
+    # did not fill, so this is not theoretical -- one stubborn name could
+    # consume the whole day retrying itself.
+    default = {"trade_date": today, "trades_submitted_today": 0,
+               "entry_attempts": {}}
 
     path = config.OPTIONS_RISK_STATE_FILE
 
@@ -201,9 +209,12 @@ def load_options_risk_state() -> dict[str, Any]:
     if state.get("trade_date") != today:
         return default
 
+    attempts = state.get("entry_attempts")
+
     return {
         "trade_date": today,
         "trades_submitted_today": int(state.get("trades_submitted_today", 0)),
+        "entry_attempts": attempts if isinstance(attempts, dict) else {},
     }
 
 
@@ -1666,6 +1677,32 @@ def run_options_scanner() -> OptionsScannerSummary:
                 })
                 continue
 
+            # BOUNDED RE-ATTEMPT. LOCKBOT's 08-25 fill ruling allows a
+            # name to be tried again on a fresh quote -- a stale displayed
+            # ask is the likeliest reason an order at the ask does not
+            # fill -- but bounds it, because the retry path is otherwise
+            # unlimited and each attempt costs a daily slot before the
+            # refund lands.
+            #
+            # Counted on SUBMISSION, not on failure: an order that filled
+            # also used an attempt, which is what keeps this a cap on
+            # tries rather than a cap on disappointments.
+            attempts_cap = getattr(config, "OPTIONS_MAX_ENTRY_ATTEMPTS", 2)
+            used = int(risk_state.get("entry_attempts", {}).get(
+                candidate["symbol"].upper(), 0))
+
+            if used >= attempts_cap:
+                print(
+                    f"\n{candidate['symbol']}: skipped — {used} entry "
+                    f"attempt(s) today, at the {attempts_cap} limit. A name "
+                    "that will not fill does not get the whole day."
+                )
+                summary.rejection_reasons["ENTRY_ATTEMPTS_EXHAUSTED"] = (
+                    summary.rejection_reasons.get(
+                        "ENTRY_ATTEMPTS_EXHAUSTED", 0) + 1
+                )
+                continue
+
             if candidate["symbol"].upper() in engaged:
                 print(
                     f"\n{candidate['symbol']}: skipped — already holding or "
@@ -2166,6 +2203,10 @@ def run_options_scanner() -> OptionsScannerSummary:
             save_positions(positions)
 
             risk_state["trades_submitted_today"] += 1
+            risk_state.setdefault("entry_attempts", {})
+            key = candidate["symbol"].upper()
+            risk_state["entry_attempts"][key] = (
+                int(risk_state["entry_attempts"].get(key, 0)) + 1)
             save_options_risk_state(risk_state)
 
             committed_premium += debit
@@ -3063,6 +3104,53 @@ def _self_test() -> int:
     # -----------------------------------------------------------------
     # Per-side premium cap (owner playbook Rule 8, adopted 2026-08-24).
     # -----------------------------------------------------------------
+    print()
+    print("One name that will not fill does not get the whole day")
+
+    import json as _json
+    import tempfile as _tf
+    from pathlib import Path as _P
+
+    original = config.OPTIONS_RISK_STATE_FILE
+    with _tf.TemporaryDirectory() as tmp:
+        config.OPTIONS_RISK_STATE_FILE = _P(tmp) / "r.json"
+        try:
+            fresh = load_options_risk_state()
+            check("a fresh day starts with no attempts",
+                  fresh.get("entry_attempts") == {}, str(fresh))
+
+            fresh["entry_attempts"]["SOFI"] = 2
+            save_options_risk_state(fresh)
+            back = load_options_risk_state()
+            check("attempts survive a save and reload",
+                  back["entry_attempts"].get("SOFI") == 2, str(back))
+
+            # A state file written before this field existed must not
+            # crash the scanner on the first cycle after the upgrade.
+            config.OPTIONS_RISK_STATE_FILE.write_text(_json.dumps(
+                {"trade_date": back["trade_date"],
+                 "trades_submitted_today": 3}), encoding="utf-8")
+            legacy = load_options_risk_state()
+            check("a state file with no attempts field still loads",
+                  legacy["entry_attempts"] == {}
+                  and legacy["trades_submitted_today"] == 3, str(legacy))
+
+            # And a corrupted value must not be trusted as a mapping.
+            config.OPTIONS_RISK_STATE_FILE.write_text(_json.dumps(
+                {"trade_date": back["trade_date"],
+                 "trades_submitted_today": 0,
+                 "entry_attempts": "not-a-dict"}), encoding="utf-8")
+            check("a non-dict attempts field is discarded, not crashed on",
+                  load_options_risk_state()["entry_attempts"] == {})
+        finally:
+            config.OPTIONS_RISK_STATE_FILE = original
+
+    body = _module_source() if "_module_source" in dir() else         _P(__file__).read_text(encoding="utf-8").split("def _self_test")[0]
+    check("the cap is consulted BEFORE the engaged check",
+          body.index("ENTRY_ATTEMPTS_EXHAUSTED") < body.index("in engaged:"))
+    check("and counted on submission, not on failure",
+          "entry_attempts\"][key] = (" in body)
+
     print()
     print("The per-side cap constrains concentration, not the cycle")
 
