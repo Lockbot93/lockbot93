@@ -3145,7 +3145,13 @@ def _self_test() -> int:
         finally:
             config.OPTIONS_RISK_STATE_FILE = original
 
-    body = _module_source() if "_module_source" in dir() else         _P(__file__).read_text(encoding="utf-8").split("def _self_test")[0]
+    # Read directly rather than through a helper this module does not
+    # have. The guarded reference that stood here was flagged by pyflakes
+    # -- correctly: a name that only resolves through a runtime dir()
+    # check is a name that is not defined. Excludes the self-test so the
+    # searches below cannot match themselves.
+    body = _P(__file__).read_text(
+        encoding="utf-8").split("def _self_test")[0]
     check("the cap is consulted BEFORE the engaged check",
           body.index("ENTRY_ATTEMPTS_EXHAUSTED") < body.index("in engaged:"))
     check("and counted on submission, not on failure",
