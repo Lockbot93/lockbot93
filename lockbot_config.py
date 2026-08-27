@@ -1352,7 +1352,26 @@ OPTIONS_REQUIRE_NONZERO_BID = True
 CAPITAL_GENERATION = "gen2_750"
 
 OPTIONS_SKEW_ENABLED = True
-OPTIONS_SKEW_LIVE = False
+# LIVE on the owner's instruction, 2026-08-26: "I want it to live trade.
+# I like to see the progress." Nothing about the pre-registered bar in
+# PREREG_OPTION_SKEW.md moves because of this -- the criteria were written
+# before any skew-sourced entry existed and are judged the same whether
+# the signal spends money or not. Running it live buys the owner
+# visibility, not a lower standard.
+#
+# WHAT LIVE ACTUALLY CHANGES. Candidates are reordered lowest-skew first,
+# and anything skew cannot vouch for is DROPPED rather than ranked last:
+# under the registration an unstable or not-easy-to-borrow name is a
+# refusal, not a weak candidate.
+#
+# EXPECT A QUIET START, AND IT IS NOT A FAULT. The stability history was
+# cleared with the account reset, and a name needs
+# OPTIONS_SKEW_MIN_READINGS consecutive same-signed readings before it is
+# tradable. Until that fills, every cycle logs "none tradable this cycle"
+# and enters nothing. It resolves itself as names recur across cycles.
+# The alternative -- trading on one reading of a 16-28% wide book -- is
+# the exact failure that produced OPTIONS_STOP_CONFIRM_CYCLES.
+OPTIONS_SKEW_LIVE = True
 
 # The stability gate. One reading of a 16-28% wide book that moves 8%
 # between polls is not a signal; the same lesson produced
