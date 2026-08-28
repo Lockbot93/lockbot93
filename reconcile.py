@@ -257,6 +257,81 @@ def check_journal_against_orders(client: Any, out: Reconciliation) -> None:
                 "the journalled exit does not match any fill on this leg"))
 
 
+def check_phantom_unfilled(client: Any, out: Reconciliation) -> None:
+    """Is anything journalled ENTRY_NOT_FILLED actually held at the broker?
+
+    THREE OCCURRENCES IN NINE DAYS, each producing a real option position
+    with no software stop -- which for options is no stop at all:
+
+        2026-08-19  XLF spread, untracked 5.5 hours, ran to -72%
+        2026-08-26  TLT 81.5P and TLT 81.0P, both filled, both written off
+        2026-08-27  XLE 60P, filled at 0.72, written off the same session
+
+    The manager writes that row, and in every instance the manager's own
+    bookkeeping was the thing that was wrong. So this check deliberately
+    does NOT ask the manager anything. It reads the journal, asks the
+    BROKER what it holds, and reports any overlap.
+
+    LOCKBOT's acceptance test, stated 2026-08-27: a filled entry can never
+    coexist with an ENTRY_NOT_FILLED journal row, checked against the
+    broker rather than against the manager's records.
+    """
+
+    import position_filters
+
+    out.checks_run += 1
+
+    try:
+        held = {str(p.symbol).upper() for p in
+                position_filters.option_positions(client.get_all_positions())}
+    except Exception as error:                              # noqa: BLE001
+        out.notes.append(
+            f"phantom check skipped: could not read broker positions "
+            f"({type(error).__name__})")
+        return
+
+    if not held:
+        return
+
+    path = Path(config.OPTIONS_COMPLETED_FILE)
+
+    if not path.exists():
+        return
+
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError as error:
+        out.notes.append(f"phantom check skipped: journal unreadable ({error})")
+        return
+
+    # Only the CONTRACT identifies the position. Matching on underlying
+    # would flag a legitimate second position in the same name.
+    phantom = []
+
+    for row in rows:
+        if (row.get("exit_reason") or "").strip().upper() != "ENTRY_NOT_FILLED":
+            continue
+
+        leg = (row.get("long_symbol") or "").strip().upper()
+
+        if leg and leg in held:
+            phantom.append((row.get("underlying", "?"), leg,
+                            (row.get("exit_time") or "")[:10]))
+
+    if phantom:
+        listing = ", ".join(f"{u} {leg} ({d})" for u, leg, d in phantom)
+        out.disagreements.append(Disagreement(
+            what="entries written off that the broker actually holds",
+            books="ENTRY_NOT_FILLED",
+            broker=listing,
+            detail=("a filled entry was journalled as never filled, so the "
+                    "position exists with no software stop -- which for "
+                    "options is no stop at all"),
+            severity="CRITICAL",
+        ))
+
+
 def check_cash_against_journal(client: Any, out: Reconciliation) -> None:
     """Does the day's journalled P&L explain the day's equity move?
 
@@ -336,6 +411,21 @@ def check_cash_against_journal(client: Any, out: Reconciliation) -> None:
             f"${gap:+.2f} unaccounted for"))
 
 
+# THE ONE REGISTRY. The runner iterates it and the self-test counts it, so
+# adding a check cannot make a passing test fail for the wrong reason --
+# which is exactly what a hard-coded 4 did when the fifth was added.
+#
+# Every entry takes (client, out); checks that need no client ignore it,
+# which is cheaper than two shapes of callable.
+CHECKS = (
+    lambda client, out: check_positions(client, out),
+    lambda client, out: check_fills_against_limits(out),
+    lambda client, out: check_journal_against_orders(client, out),
+    lambda client, out: check_phantom_unfilled(client, out),
+    lambda client, out: check_cash_against_journal(client, out),
+)
+
+
 def reconcile(client: Any = None) -> Reconciliation:
     """Compare every book LOCKBOT keeps against what the broker says."""
 
@@ -349,10 +439,7 @@ def reconcile(client: Any = None) -> Reconciliation:
         client = get_trading_client()
 
     for check in (
-        lambda: check_positions(client, out),
-        lambda: check_fills_against_limits(out),
-        lambda: check_journal_against_orders(client, out),
-        lambda: check_cash_against_journal(client, out),
+        lambda: fn(client, out) for fn in CHECKS
     ):
         try:
             check()
@@ -483,7 +570,16 @@ def _self_test() -> int:
 
     print("\nAgainst the live account")
     live = reconcile()
-    check("every check ran", live.checks_run == 4, str(live.checks_run))
+    # Pinned the literal 4 until 2026-08-28, when a fifth check was added
+    # and this failed while nothing was wrong. Seventh check in this
+    # project to assert a number that a legitimate change moves. The
+    # contract is that EVERY registered check ran, so the count is read
+    # from the registry rather than typed twice.
+    check("every registered check ran",
+          live.checks_run == len(CHECKS),
+          f"{live.checks_run} ran of {len(CHECKS)} registered")
+    check("and there is more than one of them",
+          len(CHECKS) > 1, str(len(CHECKS)))
     check("the result is reportable", isinstance(live.summary(), str))
     print(f"        {live.summary()}")
 
