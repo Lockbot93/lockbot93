@@ -158,6 +158,72 @@ def check_static() -> tuple[int, int, list[str]]:
     return (0 if problems else 1), len(problems), problems
 
 
+def check_tags() -> tuple[bool, str]:
+    """Can every decision row be attributed to the signal that made it?
+
+    THE 2026-08-27 GAP. skew_fields was added to CANDIDATE rows on 08-25
+    and never to the ORDER_SUBMITTED row, so all four live entries that
+    day wrote a blank signal_source while every candidate beside them read
+    "skew". The rows that actually become P&L were the only ones that
+    could not be attributed to the signal that chose them.
+
+    No self-test caught it, because tests check CODE PATHS and this is a
+    property of the DATA. So it is checked here, against the real log,
+    every run.
+    """
+
+    import csv
+
+    path = HERE / "options_shadow_log.csv"
+
+    if not path.exists():
+        return True, "no shadow log yet"
+
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError as error:
+        return False, f"could not read the shadow log: {error}"
+
+    if not rows or "signal_source" not in rows[0]:
+        return True, "no tagged rows yet"
+
+    # Only rows written AFTER the columns existed can be expected to carry
+    # them. Everything earlier is history, not a defect.
+    tagged = [i for i, r in enumerate(rows)
+              if any((r.get(c) or "").strip() for c in
+                     ("skew", "skew_stable", "easy_to_borrow", "signal_source"))]
+
+    if not tagged:
+        return True, "no tagged rows yet"
+
+    # Rows written before the ORDER_SUBMITTED tag was fixed are genuinely
+    # unattributable and always will be. They are LEFT IN THE LOG -- the
+    # raw record stays raw, and they are the evidence of the defect.
+    # Backfilling them to make this check pass would be editing history
+    # to satisfy a test.
+    #
+    # So the check is bounded instead. Anything from the fix onward must
+    # be tagged; the 9 rows before it are a closed, counted gap. Move this
+    # cutoff only if the tagging genuinely changes again.
+    UNTAGGED_BEFORE = "2026-08-27T21:00"
+
+    decisions = [r for r in rows[tagged[0]:]
+                 if r.get("action") in ("ORDER_SUBMITTED", "CANDIDATE")
+                 and (r.get("timestamp") or "") >= UNTAGGED_BEFORE]
+    blank = [r for r in decisions if not (r.get("signal_source") or "").strip()]
+
+    if blank:
+        kinds = sorted({r.get("action", "?") for r in blank})
+        return False, (f"{len(blank)} of {len(decisions)} decision rows "
+                       f"carry no signal_source: {kinds}")
+
+    if not decisions:
+        return True, "no decision rows since the tagging fix yet"
+
+    return True, f"{len(decisions)} decision rows, all attributable"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run every check before the market opens")
@@ -223,6 +289,14 @@ def main() -> int:
         failures.append(name)
 
     print(f"  PASS  {passed} of {len(modules)}")
+
+    print()
+    print("TAGS    every decision row can be attributed to a signal")
+    ok, detail = check_tags()
+    print(f"  {'PASS' if ok else 'FAIL'}  {detail}")
+
+    if not ok:
+        failures.append("untagged decision rows")
 
     print()
     print("BOOKS   broker against the journals")
