@@ -330,7 +330,33 @@ the coin.
 
 Pullback is entirely 2023 -- remove one year and it loses money.
 
-Oversold is the closest thing this project has produced. It survives
+**THE FAMILY IS DEAD. CLOSED 2026-08-28 ON ITS OWN REGISTRATION.**
+
+Read this before anything below it. The pre-registration one section
+down requires a non-negative edge in BOTH calendar halves and states
+that ANY failure kills the rsi-oversold-long family on crypto
+PERMANENTLY, one attempt ever. The sign test IS that clause. It failed
+on 2026-08-06, on the day the result was recorded, and the failure is in
+the paragraph below in the original author's own words.
+
+Nobody connected the recorded failure to the kill clause for three
+weeks. This document went on calling oversold "the closest thing this
+project has produced" -- which was true and irrelevant, because
+closest-and-dead is dead. LOCKBOT's nightly passes flagged the clause
+set as unverified at least eight times. A later session then proposed
+wiring the registration as the answer to a direct owner request to find
+an edge, and discovered the failure only while checking the
+precondition.
+
+The lesson is not about crypto. **A recorded failure is not a closure
+until something acts on it.** The pre-registration did its job perfectly
+and the paperwork was never filed.
+
+Do not re-propose: no ex-BTC/ETH cut, no re-cut RSI threshold, no
+swing-only pool, and not the mirrored short arm promoted to a rule of
+its own. Each is named or implied in the kill clause.
+
+Oversold WAS the closest thing this project has produced. It survives
 removing its best year at +0.081R, and +0.101R with BTC and ETH
 excluded. It still FAILS the pre-registered sign test: 2022 at -0.01 and
 2026 at -0.09.
