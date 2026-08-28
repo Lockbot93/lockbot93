@@ -624,3 +624,23 @@ safe to edit or prune by hand.
 - **2026-08-27 21:04** — 2026-08-27 first live skew session (gen2_750, four entries, all red, noise vs the n≥300 floor): signal_source tag was written on CANDIDATE rows but missed ORDER_SUBMITTED (fixed forward, 9 historical rows deliberately left untagged), and it still does not persist into option_positions_tracked or OPTIONS_COMPLETED_FILE — the registered single-leg floor cannot be judged per cohort until it does; ALSO third de5cc757 occurrence: XLE260918P00060000 filled at broker (−$20) while journalled ENTRY_NOT_FILLED, held overnight untracked with no software stop.
 
 - **2026-08-28 06:15** — 2026-08-28 ruling on owner's get-paid directive: wire the 08-06 crypto oversold pre-registration as shadow-only (crypto_shadow.py, rule+seeded control+short discriminator rows, costs charged, backfilled_forward tag on the 08-06→now gap window) — clock is clean because forward means forward-of-commitment; PRECONDITION: the 08-06 run's full clause-set verdict must be produced first (6064f181 cited +0.187R but clause passes unconfirmed; a failed clause kills the family); refused alongside: any crypto capital path, any variant rule, any historical re-run, any interim verdict readout.
+
+- **2026-08-28 15:31** — FAILURE: Recurring LOCKBOT defect, live right now: OPTIONS_MANAGER (2 untracked positions) and RECONCILIATION ('entries written off that the broker actually holds') are both DEGRADED at 08-28 20:00Z — the fourth occurrence of the de5cc757 entry-misclassification class, positions held at the broker with no software stop, and de5cc757 still sits unruled in waiting_on_you: unhandled, not survived-and-fixed.
+
+- **2026-08-28 15:31** — FAILURE: The Options Scanner 08-25 crash loop (841 exits, 210 failed self-repairs) has now gone three consecutive clean sessions (08-26/27/28), but no cause or fix is on record — a dormant LOCKBOT defect class, survived rather than handled.
+
+- **2026-08-28 15:31** — FAILURE: The 5 DNS-resolution cycle crashes 08-24/25 are the environment failing and were absorbed correctly by the mid-cycle retry loop — handled; the startup degraded-start/watchdog path remains unexercised.
+
+- **2026-08-28 15:31** — FAILURE: The quote-staleness no-fill class ran 2-for-2 on 08-28 (VCLT call and TLT put both booked ENTRY_NOT_FILLED) while the approved bounded re-attempt fix remains unshipped — LOCKBOT-side, recurring, recorded; and reconciliation's message implies some of these write-offs are actually fills, feeding the untracked class above.
+
+- **2026-08-28 15:31** — FAILURE: RULE_REVIEW remains DEGRADED on the unwired OPTIONS_STOP_CONFIRM_CYCLES floor (heartbeat still 08-21) — the known wiring gap blocked on the unbuilt strike-event log, visible and in-flight rather than ignored.
+
+- **2026-08-28 15:31** — Shadow resolved grew 635→723 with 3 wins in the marginal 88 (3.4%), split antisymmetrically — marginal uptrend longs 0/75 while marginal downtrend/shorts won 3/13 — the mirror image of the 08-19 rally cohort and the signature of a broad downdraft in the resolution window; cumulative is 112/723 (15.5%, −0.535R) with downtrend/short 20/202 (9.9%) vs uptrend/long 92/521 (17.7%).
+
+- **2026-08-28 15:31** — The de5cc757 XLE put (filled at broker but journalled ENTRY_NOT_FILLED on 08-27) was adopted and closed STOP_LOSS at −37.5% on 08-28 under regime tag 'ADOPTED'/confidence 0 — but the phantom ENTRY_NOT_FILLED row for the same order remains in the journal, so the order is double-booked.
+
+- **2026-08-28 15:31** — The gen2_750 realized options ledger is 0 wins in 3 closed trades at −$63 (BITO −34.3%, NKE −34.8%, XLE −37.5% — all within ~2.5 points of the −35% stop, no severe overshoot), equity is $667.01 (−11.1% from the $750 reset), and the NOK 10P is the sole tracked open position; the single-leg cohort's registered n≥30 floor is at roughly n=3-4.
+
+- **2026-08-28 15:31** — Item 855a8a8e is now applied: the engineer reports the exit-order lifecycle gap closed (per-cycle re-classification of submitted exit orders with re-fire on expiry, escalation on refused cycles) — awaiting my verification, noting the $750 reset it was meant to block has already been executed out of order.
+
+- **2026-08-28 15:31** — Both 08-28 option entry attempts booked ENTRY_NOT_FILLED, so the day produced zero net new tracked positions while reconciliation simultaneously reports entries written off that the broker actually holds.

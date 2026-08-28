@@ -1369,7 +1369,35 @@ def run_options_manager() -> OptionsManagerSummary:
                 if position.entry_order_id is None:
                     continue
 
-                if classify_entry_order(trading_client, position) == "FILLED":
+                # ONLY A DEAD ORDER IS A PHANTOM.
+                #
+                # This tested `== "FILLED"` and wrote off everything else,
+                # which is the root cause of five untracked, stopless
+                # positions in ten days: XLF 08-19, TLT x2 08-26, XLE
+                # 08-27, TLT and VCLT 08-28.
+                #
+                # The trigger is ordinary. A freshly submitted entry is
+                # 1 tracked against 0 held -- the order has not filled yet
+                # -- so len(ids) > broker_qty and this resolver runs on a
+                # perfectly healthy pending order. classify then returns
+                # WORKING, which is not FILLED, so the entry was journalled
+                # ENTRY_NOT_FILLED and deleted while its order was still
+                # live at the broker. VCLT filled 9.5 minutes after
+                # submission, INSIDE the 15-minute timeout, and neither it
+                # nor TLT was ever cancelled -- canceled_at is None on both.
+                #
+                # The surrounding comment reasons about THREE entries
+                # claiming one contract, where "at least two are phantoms"
+                # is true. It is not true at one and zero, and the code did
+                # not distinguish the cases.
+                #
+                # WORKING means the order is live: not a phantom, leave it.
+                # UNKNOWN means the lookup failed: not evidence that nothing
+                # was bought, which is the same correction made on the
+                # timeout path after 08-26. Only DEAD is a phantom.
+                entry_verdict = classify_entry_order(trading_client, position)
+
+                if entry_verdict != "DEAD":
                     continue
 
                 # This entry's own order did not fill. Another order put
@@ -2856,6 +2884,32 @@ def _self_test() -> int:
     live = _module_source().split("def _self_test")[0]
     check("a dead exit on a held position pages immediately",
           "exit order expired unfilled" in live)
+
+    print()
+    print("A pending entry is not a phantom")
+
+    # ROOT CAUSE OF FIVE STOPLESS POSITIONS IN TEN DAYS. The excess-entry
+    # resolver tested `== "FILLED"` and wrote off everything else. A fresh
+    # entry is 1 tracked against 0 held, so the resolver fires on a normal
+    # pending order, sees WORKING, and journals it ENTRY_NOT_FILLED while
+    # the order is still live. VCLT filled 9.5 minutes after submission --
+    # inside the timeout -- and was never cancelled.
+    import inspect as _i
+
+    resolver = _i.getsource(run_options_manager) if "run_options_manager"         in globals() else _module_source()
+    block = resolver.split("Quantity is the arbiter")[-1].split(
+        "def ")[0] if "Quantity is the arbiter" in resolver else resolver
+
+    check("only a DEAD order is treated as a phantom",
+          'entry_verdict != "DEAD"' in block,
+          "WORKING and UNKNOWN must not be written off")
+    check("and the old FILLED-only test is gone",
+          'classify_entry_order(trading_client, position) == "FILLED"'
+          not in block)
+
+    # The asymmetry that has now had to be fixed on three separate paths.
+    check("an unreadable order is not evidence nothing was bought",
+          "UNKNOWN means the lookup failed" in block)
 
     print()
     print("A contract the BROKER HOLDS is never booked as never-filled")
