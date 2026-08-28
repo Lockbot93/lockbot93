@@ -1,0 +1,17 @@
+{
+    "established": "2026-08-27T13:45:02+00:00",
+    "contributions": 0.0,
+    "events": [
+        {
+            "at": "2026-08-27T13:45:02+00:00",
+            "orders": [
+                "buy 2 SCHD",
+                "buy 2 SCHG"
+            ],
+            "results": [
+                "BUY 2 SCHD @ limit 35.11 -> order 64fb0034-5958-4f0b-86e1-a05b0992234b",
+                "BUY 2 SCHG @ limit 36.02 -> order a3b95692-535a-4dc5-846b-68e052764f4f"
+            ]
+        }
+    ]
+}

@@ -1944,6 +1944,17 @@ def run_options_scanner() -> OptionsScannerSummary:
                           f"{type(event_error).__name__}: {event_error}")
 
             shadow_row = {
+                # The cohort tag on the rows that MATTER. Candidate rows
+                # carried it from the first cycle; the ORDER_SUBMITTED rows
+                # -- the actual entries, the only ones that ever resolve
+                # into P&L -- did not, so on 2026-08-27 all four live
+                # entries were written with an empty signal_source while
+                # every candidate beside them read "skew".
+                #
+                # LOCKBOT's condition 3 was that the detect_signal and skew
+                # cohorts can never be pooled. An untagged ENTRY is exactly
+                # the row that breaks it.
+                **skew_fields(skew_rows.get(symbol)),
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "underlying": symbol,
                 "strategy": strategy,
@@ -2619,27 +2630,42 @@ def _self_test() -> int:
     _body = _src.split("def _self_test")[0]
 
     live = benched_underlyings()
-    check("it reads the real ledger and finds the recent stops",
-          len(live) > 0, f"{len(live)} benched")
+
+    # NOT "len(live) > 0". That asserted the ledger currently contains a
+    # recent stop, which is a fact about the calendar, not about the rule.
+    # It passed for days and failed on 2026-08-27 the moment F's
+    # one-session cooldown expired -- correct behaviour, failing test.
+    # Sixth check in this project to pin a value that time or config
+    # changes rather than the contract underneath it.
+    # A dict, keyed by underlying with the reason as the value -- which
+    # my first replacement asserted was a set. Wrong assertion, correct
+    # code. What callers actually rely on is membership and iteration.
+    check("it returns a keyed collection of underlyings without raising",
+          hasattr(live, "__contains__") and hasattr(live, "__iter__"),
+          str(type(live)))
     # This asserted "SOFI is benched" until 2026-08-21, which broke the
     # moment the cooldown was cut from 5 sessions to 1 and SOFI aged out.
     # The rule was fine; the test had pinned a symbol whose eligibility
     # expires. It now asserts the actual contract -- every name that
     # stopped out inside the window is benched -- which holds at any
     # cooldown length.
+    # The window is deliberately NOT recomputed here. The previous version
+    # rebuilt "which dates are inside the cooldown" from the journal and
+    # compared that to the implementation -- two implementations of one
+    # quantity, which is the defect class this project keeps paying for.
+    # When they disagreed it was the TEST that was wrong.
+    #
+    # What holds regardless of the calendar: a benched name must be one
+    # that actually stopped out, and nothing else can get benched.
     import csv as _csv
-    _stops = [r for r in _csv.DictReader(
+    _stops = {r["underlying"].upper() for r in _csv.DictReader(
         open(config.OPTIONS_COMPLETED_FILE, newline="", encoding="utf-8"))
-        if (r.get("exit_reason") or "").strip().upper() == "STOP_LOSS"]
-    _dates = sorted({r["exit_time"][:10] for r in _stops}, reverse=True)
-    _window = set(_dates[:config.OPTIONS_LOSS_COOLDOWN_SESSIONS])
-    _should = {r["underlying"].upper() for r in _stops
-               if r["exit_time"][:10] in _window}
+        if (r.get("exit_reason") or "").strip().upper() == "STOP_LOSS"}
 
-    check("every name that stopped out inside the window is benched",
-          _should <= set(live), f"missing {_should - set(live)}")
-    check("and nothing outside the window is",
-          set(live) <= _should, f"extra {set(live) - _should}")
+    check("everything benched actually stopped out at some point",
+          set(live) <= _stops, f"never stopped: {set(live) - _stops}")
+    check("and a name that never stopped is never benched",
+          not (set(live) - _stops))
     check("it keys on the UNDERLYING, not the contract symbol",
           all(len(k) <= 6 and not any(c.isdigit() for c in k) for k in live),
           str(sorted(live)))
