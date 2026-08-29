@@ -791,6 +791,12 @@ def win_rates(rows: List[dict]) -> dict:
     }
 
 
+# The only outcome values that mean a setup FINISHED. Anything else --
+# UNRESOLVED, PENDING, blank, or a value added later -- is unfinished.
+# Named positively so a new in-flight state cannot silently read as done.
+DECIDED_OUTCOMES = {"STOP", "TARGET", "EXPIRED"}
+
+
 def cohort_maturity(rows: List[dict], *, now=None) -> tuple[bool, str]:
     """Is every row in this slice old enough to have finished?
 
@@ -821,7 +827,12 @@ def cohort_maturity(rows: List[dict], *, now=None) -> tuple[bool, str]:
     for row in rows:
         stamp = (row.get("logged_at") or "").strip()
 
-        if not (row.get("outcome") or "").strip():
+        # UNRESOLVED and PENDING are LITERAL VALUES in this file, not
+        # empty cells. The first version tested emptiness and therefore
+        # counted 757 unfinished rows as finished -- a gate built to
+        # refuse unfinished data, waved through by the exact rows it
+        # exists to catch.
+        if (row.get("outcome") or "").strip().upper() not in DECIDED_OUTCOMES:
             unresolved += 1
 
         try:
