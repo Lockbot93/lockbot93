@@ -129,6 +129,7 @@ COMPLETED_COLUMNS = [
 # Exit reasons
 TAKE_PROFIT = "TAKE_PROFIT"
 STOP_LOSS = "STOP_LOSS"
+PROFIT_LOCK = "PROFIT_LOCK"
 MAX_HOLD = "MAX_HOLD_DAYS"
 NEAR_EXPIRY = "NEAR_EXPIRY"
 HOLD = "HOLD"
@@ -165,6 +166,17 @@ class OptionPosition:
     # Consecutive cycles the stop condition has held. See decide_exit --
     # a single wide-book bid print is not evidence of a 35% loss.
     stop_strikes: int = 0
+    # The profit lock. `lock_strikes` counts consecutive cycles at or above
+    # the ARM level before the floor engages -- one print on a 16-28% wide
+    # book is not evidence, the same reasoning as stop_strikes.
+    # `locked_floor` is the floor in DOLLARS once armed, and only ever
+    # rises. None means never armed.
+    lock_strikes: int = 0
+    locked_floor: float | None = None
+    # Which exit rules were in force when this position opened. Positions
+    # opened before the lock keep counting toward their own cohorts rather
+    # than being voided -- the 5e8d5140 pattern.
+    exit_rule_generation: str = "pre_lock"
     exit_order_id: str | None = None
     exit_reason: str | None = None
     paper_trade: bool = True
@@ -672,6 +684,64 @@ def decide_exit(
             f"stop, confirmed over {position.stop_strikes} cycles.",
             return_percent,
         )
+
+    # ---- Profit lock: a one-way ratchet, checked alongside the others.
+    #
+    # Runs AFTER the stop and take-profit above, at the existing priority
+    # order, first to fire wins. The order is deliberately not changed:
+    # the NEAR_EXPIRY-versus-TAKE_PROFIT ambiguity from PCG on 08-07 is
+    # still unresolved and reordering would quietly decide it.
+    #
+    # It cannot create expectancy. It caps how much of a gain can be
+    # handed back, which is a different and much smaller claim.
+    arm = getattr(config, "OPTIONS_PROFIT_LOCK_ARM_PERCENT", None)
+    floor_fraction = getattr(config, "OPTIONS_PROFIT_LOCK_FLOOR_PERCENT", None)
+
+    if arm and floor_fraction and position.entry_debit > 0:
+        arm_level = position.entry_debit * (1.0 + arm)
+        confirm = max(1, getattr(config, "OPTIONS_STOP_CONFIRM_CYCLES", 2))
+
+        if position.locked_floor is None:
+            # ARMING. Confirmed over the same number of cycles as the stop,
+            # for the same reason: a single print on a 16-28% book is not
+            # evidence, and arming on a stale quote would set a floor the
+            # position was never actually worth.
+            if current_value is not None and current_value >= arm_level:
+                position.lock_strikes += 1
+
+                if position.lock_strikes >= confirm:
+                    position.locked_floor = round(
+                        position.entry_debit * (1.0 + floor_fraction), 2)
+            else:
+                position.lock_strikes = 0
+
+        if position.locked_floor is not None and current_value is not None:
+            if current_value <= position.locked_floor:
+                # A floor breach gets the same confirmation as a stop. It
+                # costs a cycle of give-back and removes the class of exit
+                # that fires on one bad bid.
+                position.stop_strikes += 1
+
+                if position.stop_strikes < confirm:
+                    return ExitDecision(
+                        False,
+                        HOLD,
+                        f"At {return_percent:+.1%}, back at the locked floor "
+                        f"of ${position.locked_floor:.2f}, but one reading is "
+                        f"not enough on a book this wide. Confirmation "
+                        f"{position.stop_strikes}/{confirm}.",
+                        return_percent,
+                    )
+
+                return ExitDecision(
+                    True,
+                    PROFIT_LOCK,
+                    f"Fell to the locked floor of ${position.locked_floor:.2f} "
+                    f"after reaching +{arm:.0%}, confirmed over "
+                    f"{position.stop_strikes} cycles. Banked "
+                    f"{return_percent:+.1%} rather than riding it back down.",
+                    return_percent,
+                )
 
     # Price recovered into the band, so any part-built confirmation is
     # discarded. Two bad prints an hour apart must not add up to an exit.
@@ -2884,6 +2954,90 @@ def _self_test() -> int:
     live = _module_source().split("def _self_test")[0]
     check("a dead exit on a held position pages immediately",
           "exit order expired unfilled" in live)
+
+    print()
+    print("The profit lock ratchets one way and never back")
+
+    def lock_pos():
+        return OptionPosition(
+            position_id="L", underlying="NOK", strategy="LONG_CALL",
+            long_symbol="NOK261002P00010000", contracts=1, entry_debit=100.0,
+            entry_time="2026-08-29T14:00:00+00:00", expiration="2026-10-02")
+
+    rules = dict(now=datetime(2026, 8, 29, 15, tzinfo=timezone.utc),
+                 today=date(2026, 8, 29), take_profit_percent=0.50,
+                 stop_loss_percent=0.35, max_hold_days=10, min_dte_exit=14)
+    confirm = max(1, getattr(config, "OPTIONS_STOP_CONFIRM_CYCLES", 2))
+
+    # ARMING needs confirmation, exactly like the stop. One print of a
+    # stale quote must not set a floor the position was never worth.
+    p1 = lock_pos()
+    decide_exit(p1, 130.0, **rules)
+    check("one reading at +30% does not arm the lock",
+          p1.locked_floor is None and p1.lock_strikes == 1,
+          f"{p1.locked_floor} {p1.lock_strikes}")
+
+    for _ in range(confirm - 1):
+        decide_exit(p1, 130.0, **rules)
+    check(f"armed after {confirm} confirmed cycles",
+          p1.locked_floor == 110.0, str(p1.locked_floor))
+
+    # A dip BEFORE arming resets, so two good prints an hour apart cannot
+    # add up to an arm.
+    p2 = lock_pos()
+    decide_exit(p2, 130.0, **rules)
+    decide_exit(p2, 110.0, **rules)
+    check("a dip below the arm level resets the count",
+          p2.lock_strikes == 0 and p2.locked_floor is None)
+
+    # THE POINT OF THE WHOLE THING: a position that went up and came back
+    # exits with a profit rather than riding to the -35% stop.
+    p3 = lock_pos()
+    for _ in range(confirm):
+        decide_exit(p3, 130.0, **rules)
+    for _ in range(confirm):
+        last = decide_exit(p3, 105.0, **rules)
+    check("falling to the floor exits, and books a GAIN",
+          last.should_exit and last.reason == PROFIT_LOCK,
+          f"{last.reason} {last.detail[:60]}")
+
+    # A floor breach gets the stop's confirmation, not a hair trigger.
+    p4 = lock_pos()
+    for _ in range(confirm):
+        decide_exit(p4, 130.0, **rules)
+    first = decide_exit(p4, 105.0, **rules)
+    check("one print at the floor does not exit",
+          not first.should_exit or confirm == 1, first.reason)
+
+    # The floor NEVER falls. That is the whole ratchet.
+    p5 = lock_pos()
+    for _ in range(confirm):
+        decide_exit(p5, 130.0, **rules)
+    floor_after_arm = p5.locked_floor
+    decide_exit(p5, 118.0, **rules)
+    check("the floor does not drop when price does",
+          p5.locked_floor == floor_after_arm, str(p5.locked_floor))
+
+    # It must never fire on a position that never got there.
+    p6 = lock_pos()
+    for _ in range(confirm + 2):
+        never = decide_exit(p6, 90.0, **rules)
+    check("a position that never armed is untouched by the lock",
+          p6.locked_floor is None and never.reason != PROFIT_LOCK,
+          str(never.reason))
+
+    # Missing quote must not arm, and must not fire.
+    p7 = lock_pos()
+    for _ in range(confirm):
+        decide_exit(p7, 130.0, **rules)
+    blind = decide_exit(p7, None, **rules)
+    check("no quote cannot trigger the floor",
+          blind.reason != PROFIT_LOCK, str(blind.reason))
+
+    # And the config comment must not claim it makes money.
+    cfg = Path(config.__file__).read_text(encoding="utf-8")
+    check("the config says plainly it cannot create expectancy",
+          "CANNOT CREATE EXPECTANCY" in cfg.upper())
 
     print()
     print("A pending entry is not a phantom")

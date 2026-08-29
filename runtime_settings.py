@@ -75,6 +75,14 @@ ALLOWED: dict[str, tuple] = {
         float, 0.10, 2.00, "Profit target, as a fraction of premium."),
     "OPTIONS_STOP_LOSS_PERCENT": (
         float, 0.10, 0.90, "Stop, as a fraction of premium."),
+    # The profit lock. Bounded so it can be tuned without a code change,
+    # and so neither bound can be set somewhere absurd: an arm below the
+    # floor would lock in a loss, which the validator below rejects.
+    "OPTIONS_PROFIT_LOCK_ARM_PERCENT": (
+        float, 0.05, 1.00, "Gain at which the exit floor engages."),
+    "OPTIONS_PROFIT_LOCK_FLOOR_PERCENT": (
+        float, 0.00, 0.90, "Gain protected once the lock arms."),
+
     "MAX_DAILY_LOSS_PERCENT": (
         float, 0.005, 0.10, "Daily loss budget before entries stop."),
 

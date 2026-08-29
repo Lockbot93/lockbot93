@@ -1425,6 +1425,44 @@ OPTIONS_STOP_LOSS_PERCENT = 0.35
 # Every row carries it in rule_param so a later change splits cleanly.
 OPTIONS_UNDERLYING_STOP_BUFFER = 0.50
 
+# --- Profit lock: a one-way ratchet on the exit floor ---------------
+#
+# Once unrealised gain reaches ARM, a FLOOR is set and can only move up.
+# If value falls back to the floor, the position exits with a profit
+# instead of riding down to the -35% stop. NOK reached +28% on 2026-08-27
+# and returned to flat with nothing banked; that is the case this exists
+# for.
+#
+# WHAT IT IS NOT, and this comment is required rather than decorative.
+# THE LOCK CANNOT CREATE EXPECTANCY. It caps the give-back distribution;
+# it does not shift it. On a signal measured at or below random -- 32.9%
+# against random entry's 36.7%, p=0.0002 -- the honest expected outcome
+# is smaller winners and unchanged losers. Whether even that trade is
+# worth making is what the registry entry measures, and if it reads
+# COSTING_MONEY at n=30 the lock comes out regardless of who approved it.
+#
+# A comment claiming improvement here would be the 24e5b01d defect class:
+# a rationale that outruns its evidence.
+#
+# WHY NOT SIMPLY LOWER THE TAKE PROFIT, which is what was originally
+# asked. A nearer target banks less when right and loses the same when
+# wrong, so the REQUIRED WIN RATE RISES: 41.2% at +50/-35, 46.7% at +40,
+# 53.8% at +30, 58.3% at +25. Asking a coin-flip signal for 58% is worse,
+# not better. The lock leaves the required win rate untouched and only
+# changes what happens after a trade is already right.
+#
+# ARM at +25%, confirmed over OPTIONS_STOP_CONFIRM_CYCLES. A single
+# highest_value print can be a stale quote on a 16-28% wide book and must
+# not arm the lock on its own.
+OPTIONS_PROFIT_LOCK_ARM_PERCENT = 0.25
+
+# FIXED floor, not a trail. The 2026-08-07 exit-structure verdict found
+# trailing stops lift the RANDOM control as much as the rule -- a better
+# way to hold, not an edge -- and on these books any trail distance sits
+# inside one spread width. One step only; multi-tier needs its own
+# registration.
+OPTIONS_PROFIT_LOCK_FLOOR_PERCENT = 0.10
+
 OPTIONS_MAX_HOLD_DAYS = 10
 OPTIONS_MIN_DTE_EXIT = 14
 
@@ -1871,6 +1909,23 @@ except Exception as _override_error:      # pragma: no cover
 
 def validate_configuration() -> None:
     """Raise an error when a shared configuration value is unsafe."""
+
+    # A floor at or above the arm level would exit the instant it armed,
+    # booking the floor as both the trigger and the outcome. Cheap to
+    # check, and exactly the unit-confusion this validator exists for.
+    _arm = globals().get("OPTIONS_PROFIT_LOCK_ARM_PERCENT")
+    _floor = globals().get("OPTIONS_PROFIT_LOCK_FLOOR_PERCENT")
+
+    if _arm is not None and _floor is not None and _floor >= _arm:
+        # Raises, matching every other check in this function. My first
+        # version appended to a `problems` list this validator does not
+        # have -- it would have thrown NameError on the one input it
+        # exists to catch, which is worse than not checking at all.
+        raise ValueError(
+            f"OPTIONS_PROFIT_LOCK_FLOOR_PERCENT ({_floor}) must sit BELOW "
+            f"OPTIONS_PROFIT_LOCK_ARM_PERCENT ({_arm}); a floor at or above "
+            "the arm exits the moment it engages."
+        )
 
     if LIVE_TRADING_ENABLED and PAPER_TRADING:
         raise ValueError(
