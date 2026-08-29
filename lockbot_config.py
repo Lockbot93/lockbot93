@@ -1177,7 +1177,29 @@ OPTIONS_MAX_TERM_INVERSION = 1.10
 # The theta objection to low delta -- that a cheap contract is nearly all
 # extrinsic and bleeds fastest as a fraction of premium -- applies to
 # HOLDING INTO EXPIRY, which the 10-day and 14-DTE exits already forbid.
-OPTIONS_TARGET_DELTA_MIN = 0.20
+# 0.20 -> 0.30 on 2026-08-29, from the owner's written strategy document
+# and LOCKBOT's clause-by-clause ruling.
+#
+# THE REASON THE FLOOR WAS 0.20 NO LONGER EXISTS. It was dropped from
+# 0.35 because nothing above it was affordable at a $34 per-trade ceiling
+# -- affordability-forced, not signal-derived, and the config said so.
+# The $750 account puts the ceiling at $75 and that constraint is gone.
+# Leaving 0.20 in place would have been a workaround outliving its cause,
+# which is the defect class this project keeps finding.
+#
+# The owner's document caught it. Credit where it is due: neither LOCKBOT
+# nor I had revisited the floor after the reset changed its premise.
+#
+# 0.30 rather than 0.35, the low end of LOCKBOT's approved range. The pool
+# is thin -- 13 contracts across 7 symbols at 0.20 -- and 0.35 risks
+# starving it. If the pool proves ample at 0.30 the floor can rise; the
+# reverse is harder to notice.
+#
+# THIS SPLITS COHORTS. Contracts chosen at a 0.20 floor are a different
+# population from those chosen at 0.30, so single_legs_only (n=12/30) and
+# the underlying-stop shadow (n=4/20) are judged per generation from here.
+# Old rows keep counting toward their own verdicts; nothing is voided.
+OPTIONS_TARGET_DELTA_MIN = 0.30
 OPTIONS_TARGET_DELTA_MAX = 0.60
 OPTIONS_MIN_DTE = 21
 OPTIONS_MAX_DTE = 45
@@ -1454,6 +1476,30 @@ OPTIONS_UNDERLYING_STOP_BUFFER = 0.50
 # ARM at +25%, confirmed over OPTIONS_STOP_CONFIRM_CYCLES. A single
 # highest_value print can be a stale quote on a 16-28% wide book and must
 # not arm the lock on its own.
+# --- The 30-trade settings freeze --------------------------------
+#
+# From the owner's strategy document, adopted 2026-08-29 on LOCKBOT's
+# ruling, whose note was "bind the owner to it".
+#
+# No behavioural setting changes until 30 trades close from the date
+# below. Not the delta floor, not the bands, not the spread gate, not the
+# lock. Bug fixes are not settings changes and are always allowed.
+#
+# WHY IT IS THE MOST USEFUL CLAUSE IN THAT DOCUMENT. Six registered rules
+# are mid-count and NONE has reached a verdict. Every parameter move
+# splits a cohort, and this project has moved parameters repeatedly --
+# the delta floor twice, the spread gate, the cooldown, the daily loss
+# limit, the profit target. A measurement that keeps restarting produces
+# opinions, never answers.
+#
+# It binds ME as much as the owner. Shipping a "small improvement" during
+# the freeze is the same defect wearing an engineer's hat.
+#
+# preflight reports progress against it every run, so it cannot quietly
+# lapse the way the crypto clause verdict did for three weeks.
+SETTINGS_FREEZE_FROM = "2026-08-29"
+SETTINGS_FREEZE_TRADES = 30
+
 OPTIONS_PROFIT_LOCK_ARM_PERCENT = 0.25
 
 # FIXED floor, not a trail. The 2026-08-07 exit-structure verdict found

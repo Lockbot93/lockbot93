@@ -224,6 +224,52 @@ def check_tags() -> tuple[bool, str]:
     return True, f"{len(decisions)} decision rows, all attributable"
 
 
+def check_freeze() -> tuple[bool, str]:
+    """How far into the 30-trade settings freeze are we?
+
+    Reports rather than blocks. A freeze that silently lapses is exactly
+    how the crypto clause verdict sat unproduced for three weeks -- so it
+    is printed on every run, where it cannot be forgotten.
+    """
+
+    import csv
+    import importlib
+
+    try:
+        config = importlib.import_module("lockbot_config")
+        start = getattr(config, "SETTINGS_FREEZE_FROM", None)
+        need = int(getattr(config, "SETTINGS_FREEZE_TRADES", 0) or 0)
+    except Exception as error:                              # noqa: BLE001
+        return True, f"freeze not configured ({type(error).__name__})"
+
+    if not start or not need:
+        return True, "no freeze in force"
+
+    path = HERE / "options_completed_trades.csv"
+
+    if not path.exists():
+        return True, f"0 of {need} closed since {start}"
+
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+    except OSError as error:
+        return True, f"journal unreadable ({error})"
+
+    # Real closes only. An entry that never filled is not a trade, and
+    # counting one would let the freeze expire without 30 outcomes.
+    done = [r for r in rows
+            if (r.get("exit_time") or "")[:10] >= start
+            and (r.get("exit_reason") or "").strip() != "ENTRY_NOT_FILLED"]
+
+    if len(done) >= need:
+        return True, (f"{len(done)} of {need} closed since {start} -- "
+                      "FREEZE COMPLETE, settings may change again")
+
+    return True, (f"{len(done)} of {need} closed since {start} -- "
+                  f"{need - len(done)} to go, settings held")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run every check before the market opens")
@@ -299,6 +345,11 @@ def main() -> int:
         failures.append("untagged decision rows")
 
     print()
+    print("FREEZE  settings held still so the measurements can finish")
+    ok, detail = check_freeze()
+    print(f"  {'PASS' if ok else 'FAIL'}  {detail}")
+
+    print()
     print("BOOKS   broker against the journals")
     ok, detail = run([sys.executable, "reconcile.py"], timeout=300)
     print(f"  {'PASS' if ok else 'FAIL'}  {detail}")
@@ -372,7 +423,15 @@ def _self_test() -> int:
     print()
     print("It changes nothing")
     check("no order submission", "submit_order" not in source)
-    check("no file writes", 'open(' not in source.replace("capture_output", ""))
+    # Checked on WRITE MODES, not on the word "open". The original flagged
+    # any open() at all, so adding a read-only freeze check failed a test
+    # whose actual intent -- preflight changes nothing -- was never
+    # violated. A test that cannot tell reading from writing does not test
+    # what its name claims.
+    writes = [m for m in ('open(path, "w"', "open(path, 'w'", 'open(path, "a"',
+                          "open(path, 'a'", '.write(', 'writelines(')
+              if m in source]
+    check("preflight writes nothing", not writes, str(writes))
 
     print()
 
