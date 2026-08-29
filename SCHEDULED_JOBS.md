@@ -49,3 +49,11 @@ returns. A scheduled job feeding a signal measured worse than random makes
 LOCKBOT worse on a timer.
 
 Find the input first. Then build the pipe.
+
+**One correction, 2026-08-29.** An earlier version of this reasoning was
+told to the owner alongside the claim that LOCKBOT has no web access. That
+claim was false -- lockbot_brain.py sets WEB_SEARCH = True and the brain
+carries Anthropic's server-side search tool. The trading path has no
+internet; the brain does. The argument above is unaffected, since it is
+about whether a continuous sentiment feed is worth ingesting, not about
+whether one is technically possible.

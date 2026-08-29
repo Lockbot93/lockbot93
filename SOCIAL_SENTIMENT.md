@@ -58,10 +58,27 @@ datasets is exactly the kind of thing that gets fitted.
 
 ## The capability limit, stated plainly
 
-Neither agent can stay continuously connected. The engineer exists only
-while the owner is talking to it. LOCKBOT runs every five minutes and has
-NO web access at all -- by design, since nothing on its trading path
-imports anything that reaches the internet.
+CORRECTED 2026-08-29. The paragraph below originally said LOCKBOT has no
+web access at all. That is FALSE and was stated twice to the owner.
+
+lockbot_brain.py line 132 sets WEB_SEARCH = True, and the brain declares
+Anthropic's server-side web_search tool. Its own comment says what it is
+for: "what turns 'what LOCKBOT recorded' into 'what is true in the world'
+-- why a stock moved, what an earnings date is, what a rule actually
+says."
+
+The error was checking the TRADING modules and never checking the brain.
+The trading path genuinely reaches nothing but Alpaca, Telegram and
+Pushover -- that half was right -- but the brain is the part that thinks,
+and it can search.
+
+Note also: --read-only DISABLES it. Every ruling LOCKBOT gave this week
+came through that flag, so all of them were answered from its own data
+rather than the internet.
+
+What remains true: neither agent is continuously connected. The engineer
+exists only while the owner is talking to it. LOCKBOT searches when it is
+asked something -- a conversation, its nightly pass -- not on a feed.
 
 So "stay tapped in online" is not available as a live feed. What is
 available is research brought back and tested, which is what this is.
