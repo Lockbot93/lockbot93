@@ -791,7 +791,71 @@ def win_rates(rows: List[dict]) -> dict:
     }
 
 
+def cohort_maturity(rows: List[dict], *, now=None) -> tuple[bool, str]:
+    """Is every row in this slice old enough to have finished?
+
+    THE 2026-08-29 READING HAZARD. An independent analysis reported week
+    35 at -0.93R from 118 stops and 3 targets with ZERO expired, and
+    concluded the resolver was censoring results. It was not: the
+    resolver is faithful and test-pinned. Those rows were simply still
+    INSIDE their SHADOW_MAX_DAYS window.
+
+    But the hazard the analysis identified is real, even though its
+    diagnosis was wrong. STOPS RESOLVE FASTEST -- a stop can be booked
+    within hours, while an expiry takes the full window -- so any slice
+    read before its rows mature is biased toward losses by construction.
+    A partial read is not a small error; it has a known sign.
+
+    So the refusal lives here, in the tool that reports, rather than in
+    the resolver that was never broken. A slice containing any row too
+    young to have finished cannot be summarised at all.
+    """
+
+    from datetime import datetime, timedelta, timezone
+
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=SHADOW_MAX_DAYS)
+    young = 0
+    unresolved = 0
+
+    for row in rows:
+        stamp = (row.get("logged_at") or "").strip()
+
+        if not (row.get("outcome") or "").strip():
+            unresolved += 1
+
+        try:
+            logged = datetime.fromisoformat(stamp)
+        except ValueError:
+            # A row whose age cannot be read is a row that cannot be shown
+            # to have finished. Counted as young, never skipped -- the
+            # first version `continue`d here, so a malformed date passed
+            # as mature. Fail closed: the whole point of this gate is that
+            # an unreadable row must not license a reading.
+            young += 1
+            continue
+
+        if logged.tzinfo is None:
+            logged = logged.replace(tzinfo=timezone.utc)
+
+        if logged > cutoff:
+            young += 1
+
+    if young or unresolved:
+        return False, (f"{young} row(s) younger than the {SHADOW_MAX_DAYS}-day "
+                       f"window and {unresolved} unresolved -- stops resolve "
+                       "fastest, so reading this now is biased toward losses")
+
+    return True, "all rows mature"
+
+
 def _print_group(label: str, rows: List[dict], min_count: int = 5) -> None:
+    mature, why = cohort_maturity(rows)
+
+    if not mature:
+        print(f"  {label:<22} {len(rows):>4} rows     NOT READABLE: {why}")
+        return
+
     stats = _summarize(rows)
 
     if stats["count"] < min_count:
@@ -1303,6 +1367,40 @@ def _self_test() -> int:
           record_candidates([{"symbol": "BROKEN"}], temp) == 0)
 
     temp.unlink(missing_ok=True)
+    print("A slice with immature rows cannot be summarised at all")
+
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    _now = _dt(2026, 8, 29, 12, tzinfo=_tz.utc)
+    _old = (_now - _td(days=SHADOW_MAX_DAYS + 5)).isoformat()
+    _new = (_now - _td(days=1)).isoformat()
+
+    mature, why = cohort_maturity(
+        [{"logged_at": _old, "outcome": "STOP"},
+         {"logged_at": _old, "outcome": "EXPIRED"}], now=_now)
+    check("a fully resolved, fully aged slice is readable", mature)
+
+    # THE 08-29 HAZARD. Stops book within hours, expiries take the full
+    # window, so a young slice reads as losses by construction.
+    mature, why = cohort_maturity(
+        [{"logged_at": _old, "outcome": "STOP"},
+         {"logged_at": _new, "outcome": "STOP"}], now=_now)
+    check("one row inside the window blocks the whole slice", not mature)
+
+    mature, why = cohort_maturity(
+        [{"logged_at": _old, "outcome": "STOP"},
+         {"logged_at": _old, "outcome": ""}], now=_now)
+    check("an unresolved row blocks it too", not mature)
+
+    # A row with an unreadable timestamp must not silently pass as mature.
+    mature, why = cohort_maturity(
+        [{"logged_at": "not-a-date", "outcome": ""}], now=_now)
+    check("an unreadable date still counts as unresolved", not mature)
+
+    check("an empty slice is vacuously mature",
+          cohort_maturity([], now=_now)[0])
+
+
 
     print()
     if failures:
