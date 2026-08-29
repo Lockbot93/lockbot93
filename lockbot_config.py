@@ -1267,7 +1267,11 @@ OPTIONS_MAX_MONEYNESS_PERCENT = 0.07
 # THE CONDITION THIS SHIPPED UNDER. Registered in rule_registry with a
 # cohort split by spread band. If trades entered in the 5-8% band run
 # 0.08 of debit worse than those under 5% at n >= 30, the verdict is
-# COSTING_MONEY and this reverts to 0.05. entry_spread_percent is
+# COSTING_MONEY and this reverts to 0.05 -- WIRED 2026-08-29 to
+# rule_actuator, which performs that revert automatically after three
+# consecutive COSTING_MONEY runs. Until then this sentence was prose with
+# no mechanism, which is the unenforced-pre-registration defect class.
+# entry_spread_percent is
 # journalled per trade so that split is possible -- without it the
 # condition would be unenforceable and the guarantee empty.
 #
@@ -1462,6 +1466,10 @@ OPTIONS_UNDERLYING_STOP_BUFFER = 0.50
 # is smaller winners and unchanged losers. Whether even that trade is
 # worth making is what the registry entry measures, and if it reads
 # COSTING_MONEY at n=30 the lock comes out regardless of who approved it.
+# NOT AUTOMATED, deliberately: LOCKBOT ruled the options exit path is
+# never actuated, because the software stop is the only stop options
+# have. A COSTING_MONEY verdict here FILES for a human. The guarantee is
+# real, the hand that performs it is not this program's.
 #
 # A comment claiming improvement here would be the 24e5b01d defect class:
 # a rationale that outruns its evidence.
@@ -1497,6 +1505,15 @@ OPTIONS_UNDERLYING_STOP_BUFFER = 0.50
 #
 # preflight reports progress against it every run, so it cannot quietly
 # lapse the way the crypto clause verdict did for three weeks.
+# The actuator's kill switch, default ON. A COSTING_MONEY verdict may
+# undo its own experiment, in the RESTRICTIVE direction only, once per
+# rule, at most once a day, after surviving three consecutive scheduled
+# runs. Everything else -- the exit path, any loosening, anything without
+# a recorded baseline -- files for a human.
+#
+# The actuator cannot reach this switch. See rule_actuator.FORBIDDEN.
+RULE_ACTUATOR_ENABLED = True
+
 SETTINGS_FREEZE_FROM = "2026-08-29"
 SETTINGS_FREEZE_TRADES = 30
 

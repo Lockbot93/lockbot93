@@ -1,0 +1,40 @@
+{
+ "rules": {
+  "options_loss_cooldown": {
+   "consecutive": 0,
+   "last_status": "ACCUMULATING",
+   "last_n": 0,
+   "last_seen": "2026-08-29T09:59:35+00:00"
+  },
+  "entry_limit_fraction": {
+   "consecutive": 0,
+   "last_status": "ACCUMULATING",
+   "last_n": 20,
+   "last_seen": "2026-08-29T09:59:35+00:00"
+  },
+  "stop_confirm_cycles": {
+   "consecutive": 0,
+   "last_status": "ACCUMULATING",
+   "last_n": 2,
+   "last_seen": "2026-08-29T09:59:35+00:00"
+  },
+  "single_legs_only": {
+   "consecutive": 0,
+   "last_status": "ACCUMULATING",
+   "last_n": 12,
+   "last_seen": "2026-08-29T09:59:35+00:00"
+  },
+  "underlying_stop_buffer": {
+   "consecutive": 0,
+   "last_status": "ACCUMULATING",
+   "last_n": 4,
+   "last_seen": "2026-08-29T09:59:35+00:00"
+  },
+  "spread_ceiling": {
+   "consecutive": 0,
+   "last_status": "ACCUMULATING",
+   "last_n": 2,
+   "last_seen": "2026-08-29T09:59:35+00:00"
+  }
+ }
+}

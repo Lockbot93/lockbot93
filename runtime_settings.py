@@ -75,6 +75,14 @@ ALLOWED: dict[str, tuple] = {
         float, 0.10, 2.00, "Profit target, as a fraction of premium."),
     "OPTIONS_STOP_LOSS_PERCENT": (
         float, 0.10, 0.90, "Stop, as a fraction of premium."),
+    # The actuator's kill switch. On the allowlist so it can be disarmed
+    # without a code change -- but the actuator can never reach it, which
+    # is checked in FORBIDDEN and by its own self-test. A switch a system
+    # can flip on itself is not a switch.
+    "RULE_ACTUATOR_ENABLED": (
+        bool, None, None, "Whether a COSTING_MONEY verdict may auto-revert "
+                          "its own experiment."),
+
     # The profit lock. Bounded so it can be tuned without a code change,
     # and so neither bound can be set somewhere absurd: an arm below the
     # floor would lock in a loss, which the validator below rejects.

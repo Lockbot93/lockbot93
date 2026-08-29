@@ -15,7 +15,25 @@ Recorded here so the schedule can be rebuilt from the repo.
 | LockBot ETF Portfolio | daily | the buy-and-hold sleeve |
 | LockBot Shadow Resolve | daily 15:15 | resolves equity + options shadow setups |
 | **LockBot Candidate Resolve** | **daily 15:25** | **resolves the setups LOCKBOT ranked and DID NOT take** |
+| **LockBot Rule Review** | **daily 15:35** | **computes the registry verdicts** |
+| **LockBot Rule Actuator** | **daily 15:40** | **acts on a COSTING_MONEY verdict, or files it** |
 | LockBot Learning Pass | nightly | LOCKBOT reads its own logs and files findings |
+
+## The 15:15 -> 15:40 chain, added 2026-08-29
+
+    15:15  Shadow Resolve      resolve the day's shadow setups
+    15:25  Candidate Resolve   resolve what LOCKBOT ranked and skipped
+    15:35  Rule Review         compute verdicts from the resolved data
+    15:40  Rule Actuator       act on a verdict, or file it
+
+The order is the point. Verdicts computed before the day is resolved would
+judge a partial sample, and an actuator running before the verdicts would
+act on yesterday's.
+
+Rule Review was missing entirely until 2026-08-29. Five jobs ran daily and
+the one producing VERDICTS only ran when an engineer typed it -- so a rule
+could reach COSTING_MONEY and sit unnoticed, which is exactly how the
+08-06 crypto clause failure went unactioned for three weeks.
 
 ## The one added 2026-08-28
 
