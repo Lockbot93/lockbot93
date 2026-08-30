@@ -1049,12 +1049,41 @@ predicts — and the capacity argument holds: a $50 position is 0.0119% of
 a day's volume in that bucket, so a small account genuinely can go where
 funds cannot.
 
-It is still not a strategy. Holding everything beat both extremes, and
-three things eat the 4.5% before it reaches an account: monthly
-rebalancing across 249 thin names is enormous turnover, thin names carry
-the widest spreads (a 0.5% round trip twelve times a year is 6%), and
-survivorship bias is worst exactly here, since small illiquid companies
-are the ones that go to zero and vanish from the sample.
+**CLOSED AS UNMEASURABLE HERE, 2026-08-30, on three facts that stand
+together. Read all three: no one of them carries the closure alone.**
+
+An outside critic argued in 2026-08 that we had scored a small-account
+anomaly with a FUND's implementation template, and on one leg it was
+right. The turnover argument below was wrong and is struck: academic
+sorts rebalance ANNUALLY precisely because monthly turnover in thin names
+donates the premium to the spread, and annual reconstitution cuts that leg
+twelve-fold. The critic then withdrew its own claim on the evidence in the
+first fact below. Both sides were wrong in different directions and
+arrived at the same verdict.
+
+**1. Survivorship cannot be corrected on this feed. In-sample, and
+decisive.** Alpaca returns ZERO daily bars for delisted symbols —
+verified on 12 of 12 inactive names, 2026-08-30. Small illiquid companies
+are exactly the ones that go to zero, so a backtest built here silently
+drops its own failures. Shumway's result is that delisting bias alone can
+manufacture a premium of this size.
+
+**2. The clean public series lost this decade.** Fama-French SMB is
+already annual reconstitution and already delisting-corrected — it is the
+series we would have used if Alpaca had priced the delists. It ran
+**−3.23%/yr over 2015–2025 and was positive in 2 of 11 years.** That is
+not a fund-template argument; it is the trade, done properly, losing.
+
+**3. Eight names do not inherit a 249-name mean.** The +4.52% was measured
+on a 249-name equal-weight basket. A 5–10 name draw has the same expected
+value and a standard error that eats a 4.5% premium over a decade of data.
+That is a variance problem, not an expectancy one — which is why it is
+stated separately from fact 2 rather than folded into it.
+
+What survives from the original reading: holding everything beat both
+extremes, and thin names carry the widest spreads (a 0.5% round trip
+twelve times a year is 6%) — a real cost, though annual rebalancing
+reduces it to roughly 0.5%.
 
 Recorded because it is the closest thing to a real edge found, and
 because the reason it fails is transaction costs rather than absence of
