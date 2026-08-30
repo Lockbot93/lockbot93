@@ -176,7 +176,11 @@ class OptionPosition:
     # Which exit rules were in force when this position opened. Positions
     # opened before the lock keep counting toward their own cohorts rather
     # than being voided -- the 5e8d5140 pattern.
-    exit_rule_generation: str = "pre_lock"
+    # Bumped when the exit rules change, so cohorts split rather than
+    # pool. "pre_lock" -> "lock_25_10" -> "lock_15_08". The 25/10
+    # generation carries ZERO armed rows; that empty record is correct and
+    # is why riding the old tag would have mislabelled every 15/8 exit.
+    exit_rule_generation: str = "lock_15_08"
     exit_order_id: str | None = None
     exit_reason: str | None = None
     paper_trade: bool = True
@@ -701,7 +705,24 @@ def decide_exit(
         arm_level = position.entry_debit * (1.0 + arm)
         confirm = max(1, getattr(config, "OPTIONS_STOP_CONFIRM_CYCLES", 2))
 
-        if position.locked_floor is None:
+        # THE THIN-BAND GUARD (LOCKBOT, 030b4045). The arm-to-floor band
+        # in PREMIUM terms must clear a few ticks, or the lock is
+        # measuring bid flicker rather than movement. At 15/8 on a $25
+        # contract the band is $0.0175 per share -- one tick crosses it.
+        #
+        # Contracts under roughly $43 of debit therefore never arm. That
+        # is most of what this account can afford, and it is correct: a
+        # floor indistinguishable from spread noise is not a floor.
+        band_per_share = ((arm - floor_fraction) * position.entry_debit
+                          / CONTRACT_MULTIPLIER)
+        min_band = getattr(config, "OPTIONS_PROFIT_LOCK_MIN_BAND_DOLLARS", 0.0)
+
+        if band_per_share < min_band:
+            arm = None
+
+        if arm is None:
+            pass
+        elif position.locked_floor is None:
             # ARMING. Confirmed over the same number of cycles as the stop,
             # for the same reason: a single print on a 16-28% book is not
             # evidence, and arming on a stale quote would set a floor the
@@ -2971,22 +2992,31 @@ def _self_test() -> int:
 
     # ARMING needs confirmation, exactly like the stop. One print of a
     # stale quote must not set a floor the position was never worth.
+    # Above the arm level whatever it is set to, and clear of the floor.
+    above = 100.0 * (1.0 + config.OPTIONS_PROFIT_LOCK_ARM_PERCENT) + 5.0
+    below = 100.0 * (1.0 + config.OPTIONS_PROFIT_LOCK_ARM_PERCENT) - 5.0
+
     p1 = lock_pos()
-    decide_exit(p1, 130.0, **rules)
+    decide_exit(p1, above, **rules)
     check("one reading at +30% does not arm the lock",
           p1.locked_floor is None and p1.lock_strikes == 1,
           f"{p1.locked_floor} {p1.lock_strikes}")
 
     for _ in range(confirm - 1):
-        decide_exit(p1, 130.0, **rules)
+        decide_exit(p1, above, **rules)
+    # Derived from config, not pinned. The literal 110.0 here was the 10%
+    # floor and broke the moment the owner moved it to 8% -- the same
+    # class of test failure this project has now hit eight times.
+    expected_floor = round(100.0 * (1.0 + config.OPTIONS_PROFIT_LOCK_FLOOR_PERCENT), 2)
     check(f"armed after {confirm} confirmed cycles",
-          p1.locked_floor == 110.0, str(p1.locked_floor))
+          p1.locked_floor == expected_floor,
+          f"{p1.locked_floor} vs {expected_floor}")
 
     # A dip BEFORE arming resets, so two good prints an hour apart cannot
     # add up to an arm.
     p2 = lock_pos()
-    decide_exit(p2, 130.0, **rules)
-    decide_exit(p2, 110.0, **rules)
+    decide_exit(p2, above, **rules)
+    decide_exit(p2, below, **rules)
     check("a dip below the arm level resets the count",
           p2.lock_strikes == 0 and p2.locked_floor is None)
 
@@ -2994,9 +3024,9 @@ def _self_test() -> int:
     # exits with a profit rather than riding to the -35% stop.
     p3 = lock_pos()
     for _ in range(confirm):
-        decide_exit(p3, 130.0, **rules)
+        decide_exit(p3, above, **rules)
     for _ in range(confirm):
-        last = decide_exit(p3, 105.0, **rules)
+        last = decide_exit(p3, expected_floor - 1.0, **rules)
     check("falling to the floor exits, and books a GAIN",
           last.should_exit and last.reason == PROFIT_LOCK,
           f"{last.reason} {last.detail[:60]}")
@@ -3004,17 +3034,17 @@ def _self_test() -> int:
     # A floor breach gets the stop's confirmation, not a hair trigger.
     p4 = lock_pos()
     for _ in range(confirm):
-        decide_exit(p4, 130.0, **rules)
-    first = decide_exit(p4, 105.0, **rules)
+        decide_exit(p4, above, **rules)
+    first = decide_exit(p4, expected_floor - 1.0, **rules)
     check("one print at the floor does not exit",
           not first.should_exit or confirm == 1, first.reason)
 
     # The floor NEVER falls. That is the whole ratchet.
     p5 = lock_pos()
     for _ in range(confirm):
-        decide_exit(p5, 130.0, **rules)
+        decide_exit(p5, above, **rules)
     floor_after_arm = p5.locked_floor
-    decide_exit(p5, 118.0, **rules)
+    decide_exit(p5, expected_floor + 2.0, **rules)
     check("the floor does not drop when price does",
           p5.locked_floor == floor_after_arm, str(p5.locked_floor))
 
@@ -3029,7 +3059,7 @@ def _self_test() -> int:
     # Missing quote must not arm, and must not fire.
     p7 = lock_pos()
     for _ in range(confirm):
-        decide_exit(p7, 130.0, **rules)
+        decide_exit(p7, above, **rules)
     blind = decide_exit(p7, None, **rules)
     check("no quote cannot trigger the floor",
           blind.reason != PROFIT_LOCK, str(blind.reason))
@@ -3038,6 +3068,35 @@ def _self_test() -> int:
     cfg = Path(config.__file__).read_text(encoding="utf-8")
     check("the config says plainly it cannot create expectancy",
           "CANNOT CREATE EXPECTANCY" in cfg.upper())
+
+    # THE THIN-BAND GUARD. At 15/8 the band is 7 points of debit, which on
+    # a cheap contract is thinner than a tick -- the lock would be
+    # measuring bid flicker. LOCKBOT added this; I had not thought of it.
+    cheap = OptionPosition(
+        position_id="C", underlying="X", strategy="LONG_CALL",
+        long_symbol="X260918C00010000", contracts=1, entry_debit=25.0,
+        entry_time="2026-08-30T14:00:00+00:00", expiration="2026-10-02")
+    band = ((config.OPTIONS_PROFIT_LOCK_ARM_PERCENT
+             - config.OPTIONS_PROFIT_LOCK_FLOOR_PERCENT) * 25.0 / 100.0)
+    check("a $25 contract's band is under three ticks",
+          band < config.OPTIONS_PROFIT_LOCK_MIN_BAND_DOLLARS,
+          f"{band:.4f}")
+
+    for _ in range(confirm + 1):
+        decide_exit(cheap, 25.0 * 1.30, **rules)
+    check("so a cheap contract never arms the lock at all",
+          cheap.locked_floor is None and cheap.lock_strikes == 0,
+          f"{cheap.locked_floor} {cheap.lock_strikes}")
+
+    # And a contract wide enough to measure still arms normally.
+    rich = OptionPosition(
+        position_id="R", underlying="Y", strategy="LONG_CALL",
+        long_symbol="Y260918C00010000", contracts=1, entry_debit=100.0,
+        entry_time="2026-08-30T14:00:00+00:00", expiration="2026-10-02")
+    for _ in range(confirm):
+        decide_exit(rich, above, **rules)
+    check("a contract with a measurable band still arms",
+          rich.locked_floor == expected_floor, str(rich.locked_floor))
 
     print()
     print("A pending entry is not a phantom")

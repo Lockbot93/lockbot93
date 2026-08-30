@@ -1517,14 +1517,40 @@ RULE_ACTUATOR_ENABLED = True
 SETTINGS_FREEZE_FROM = "2026-08-29"
 SETTINGS_FREEZE_TRADES = 30
 
-OPTIONS_PROFIT_LOCK_ARM_PERCENT = 0.25
+# 25% -> 15% on 2026-08-30, owner directive, LOCKBOT ruling 030b4045.
+#
+# He asked for an 18% TAKE PROFIT. That was refused with three numbers: an
+# 18% target against the -35% stop needs a 66.0% win rate to break even
+# (against 41.2% at +50%), on a book that is 0 for 13; it fires BEFORE the
+# lock arms, so he would have been trading the lock away without meaning
+# to; and it breaks the freeze adopted an hour earlier.
+#
+# Lowering the ARM gets what he actually wanted -- gains banked early --
+# and leaves the required win rate COMPLETELY UNCHANGED, because it moves
+# what happens after a trade is right rather than moving the finish line.
+OPTIONS_PROFIT_LOCK_ARM_PERCENT = 0.15
 
 # FIXED floor, not a trail. The 2026-08-07 exit-structure verdict found
 # trailing stops lift the RANDOM control as much as the rule -- a better
 # way to hold, not an edge -- and on these books any trail distance sits
 # inside one spread width. One step only; multi-tier needs its own
 # registration.
-OPTIONS_PROFIT_LOCK_FLOOR_PERCENT = 0.10
+OPTIONS_PROFIT_LOCK_FLOOR_PERCENT = 0.08
+
+# THE GUARD LOCKBOT ADDED, and it is the part I would not have thought of.
+#
+# The lock does not arm at all when the arm-to-floor band is thinner than
+# this in PREMIUM terms. At 15/8 the band is 7 points of debit, which on a
+# $25 contract is 0.07 x $0.25 = $0.0175 per share -- crossable by a
+# single tick of bid flicker. Below three ticks the geometry is measuring
+# quote noise rather than price movement, so it stays disarmed.
+#
+# In practice this means contracts under roughly $43 of debit will not arm
+# the lock. That is most of what this account can afford, and it is the
+# correct outcome: a floor you cannot distinguish from spread noise is not
+# a floor. Tightening the bands to force it to apply would be fitting the
+# rule to the account rather than to the market.
+OPTIONS_PROFIT_LOCK_MIN_BAND_DOLLARS = 0.03
 
 OPTIONS_MAX_HOLD_DAYS = 10
 OPTIONS_MIN_DTE_EXIT = 14
